@@ -200,6 +200,7 @@ class TargetElement(Base, TimestampMixin):
     numbering_id: Mapped[str | None] = mapped_column(String(255), index=True)
     normalized: Mapped[dict] = mapped_column(JsonType, nullable=False)
     classification: Mapped[dict | None] = mapped_column(JsonType)
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(1536))
 
 
 class MappingResult(Base, TimestampMixin):
@@ -211,5 +212,19 @@ class MappingResult(Base, TimestampMixin):
     )
     profile_rule_id: Mapped[str | None] = mapped_column(ForeignKey("profile_rules.id"))
     score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    strategy: Mapped[str] = mapped_column(String(64), nullable=False)
+    rationale: Mapped[dict] = mapped_column(JsonType, nullable=False)
+
+
+class MappingCandidate(Base, TimestampMixin):
+    __tablename__ = "mapping_candidates"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    target_element_id: Mapped[str] = mapped_column(
+        ForeignKey("target_elements.id"), nullable=False, index=True
+    )
+    profile_rule_id: Mapped[str] = mapped_column(ForeignKey("profile_rules.id"), nullable=False)
+    rank: Mapped[int] = mapped_column(Integer, nullable=False)
+    score: Mapped[int] = mapped_column(Integer, nullable=False)
     strategy: Mapped[str] = mapped_column(String(64), nullable=False)
     rationale: Mapped[dict] = mapped_column(JsonType, nullable=False)

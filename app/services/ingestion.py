@@ -1,10 +1,12 @@
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.models.document import (
     DocumentVersion,
     FormatAtom,
     FormatProfile,
+    MappingCandidate,
     MappingResult,
     MediaAsset,
     OOXMLPart,
@@ -14,8 +16,10 @@ from app.models.document import (
 )
 from app.services.atoms import body_atoms, document_setup_atoms, header_footer_atoms, note_atoms
 from app.services.docx_package import DocxSecurityError, PackagePart, inspect_docx_package
+from app.services.embeddings import embed_format_atoms, embed_target_elements
 from app.services.ooxml import image_size, parse_numbering, parse_relationships, parse_styles
 from app.services.profile_builder import rebuild_deterministic_profile
+from app.services.target_mapping import rebuild_target_elements
 
 
 def ingest_template_version(db: Session, version: DocumentVersion) -> None:
@@ -36,8 +40,24 @@ def ingest_template_version(db: Session, version: DocumentVersion) -> None:
         numbering_info = parse_numbering(_part_text(part_by_name.get("word/numbering.xml")))
         atoms = _build_atoms(part_by_name, styles_info, numbering_info)
         _store_atoms(db, version.id, atoms)
+        embedding_counts = embed_format_atoms(db, version.id)
         if version.document.kind == "template":
-            rebuild_deterministic_profile(db, version.id, f"{version.filename} profile")
+            profile = rebuild_deterministic_profile(db, version.id, f"{version.filename} profile")
+            profile.summary = {
+                **profile.summary,
+                "embedding": embedding_counts,
+                "embeddingModel": settings.gemini_embedding_model
+                if settings.gemini_api_key
+                else None,
+                "embeddingDimensions": settings.gemini_embedding_dimensions
+                if settings.gemini_api_key
+                else None,
+            }
+            db.add(profile)
+            db.commit()
+        elif version.document.kind == "target":
+            rebuild_target_elements(db, version.id)
+            embed_target_elements(db, version.id)
         _set_status(db, version, "done", 100)
     except (DocxSecurityError, ValueError) as exc:
         _set_status(db, version, "failed", version.progress, str(exc))
@@ -63,8 +83,10 @@ def _set_status(
 
 
 def _clear_existing_parse(db: Session, version_id: str) -> None:
+    target_ids = select(TargetElement.id).where(TargetElement.document_version_id == version_id)
+    db.execute(delete(MappingCandidate).where(MappingCandidate.target_element_id.in_(target_ids)))
+    db.execute(delete(MappingResult).where(MappingResult.target_element_id.in_(target_ids)))
     for model in (
-        MappingResult,
         TargetElement,
         ProfileRule,
         FormatProfile,

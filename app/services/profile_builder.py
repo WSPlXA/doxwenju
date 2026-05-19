@@ -8,7 +8,9 @@ from app.models.document import FormatAtom, FormatProfile, ProfileRule
 PROFILE_SOURCE = "deterministic_v0"
 
 
-def rebuild_deterministic_profile(db: Session, document_version_id: str, name: str) -> FormatProfile:
+def rebuild_deterministic_profile(
+    db: Session, document_version_id: str, name: str
+) -> FormatProfile:
     atoms = list(
         db.scalars(
             select(FormatAtom)
@@ -17,7 +19,9 @@ def rebuild_deterministic_profile(db: Session, document_version_id: str, name: s
         )
     )
     db.execute(delete(ProfileRule).where(ProfileRule.document_version_id == document_version_id))
-    db.execute(delete(FormatProfile).where(FormatProfile.document_version_id == document_version_id))
+    db.execute(
+        delete(FormatProfile).where(FormatProfile.document_version_id == document_version_id)
+    )
     db.flush()
 
     profile = FormatProfile(

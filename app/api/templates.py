@@ -6,11 +6,20 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.db.session import get_db
-from app.models.document import Document, DocumentVersion, FormatAtom, OOXMLPart
+from app.models.document import (
+    Document,
+    DocumentVersion,
+    FormatAtom,
+    FormatProfile,
+    OOXMLPart,
+    ProfileRule,
+)
 from app.schemas.template import (
     AtomResponse,
     PageResponse,
     PartResponse,
+    ProfileResponse,
+    RuleResponse,
     TemplateStatusResponse,
     TemplateUploadResponse,
 )
@@ -176,5 +185,70 @@ def current_template_atoms(
             relationship_id=a.relationship_id,
         )
         for a in atoms
+    ]
+    return PageResponse(items=items, limit=limit, offset=offset, total=total)
+
+
+@router.get("/current/profile", response_model=ProfileResponse)
+def current_template_profile(db: Session = Depends(get_db)):
+    version = _current_template_version(db)
+    if version is None:
+        raise HTTPException(status_code=404, detail="No current template")
+    profile = db.scalar(
+        select(FormatProfile)
+        .where(FormatProfile.document_version_id == version.id)
+        .order_by(FormatProfile.created_at.desc())
+        .limit(1)
+    )
+    if profile is None:
+        raise HTTPException(status_code=404, detail="No profile for current template")
+    return ProfileResponse(
+        id=profile.id,
+        document_version_id=profile.document_version_id,
+        name=profile.name,
+        version=profile.version,
+        status=profile.status,
+        source=profile.source,
+        summary=profile.summary,
+    )
+
+
+@router.get("/current/rules", response_model=PageResponse)
+def current_template_rules(
+    rule_type: str | None = None,
+    element_category: str | None = None,
+    limit: int = Query(default=50, le=200, ge=1),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
+    version = _current_template_version(db)
+    if version is None:
+        raise HTTPException(status_code=404, detail="No current template")
+
+    base = select(ProfileRule).where(ProfileRule.document_version_id == version.id)
+    if rule_type:
+        base = base.where(ProfileRule.rule_type == rule_type)
+    if element_category:
+        base = base.where(ProfileRule.element_category == element_category)
+
+    total = db.scalar(select(func.count()).select_from(base.subquery())) or 0
+    rules = db.scalars(
+        base.order_by(ProfileRule.priority, ProfileRule.created_at, ProfileRule.id)
+        .limit(limit)
+        .offset(offset)
+    ).all()
+    items = [
+        RuleResponse(
+            id=rule.id,
+            rule_type=rule.rule_type,
+            element_category=rule.element_category,
+            name=rule.name,
+            priority=rule.priority,
+            selector=rule.selector,
+            properties=rule.properties,
+            source_atom_ids=rule.source_atom_ids,
+            confidence=rule.confidence,
+        )
+        for rule in rules
     ]
     return PageResponse(items=items, limit=limit, offset=offset, total=total)

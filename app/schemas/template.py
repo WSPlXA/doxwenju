@@ -42,6 +42,67 @@ class AtomResponse(BaseModel):
     relationship_id: str | None
 
 
+class ProfileResponse(BaseModel):
+    id: str
+    document_version_id: str
+    name: str
+    version: int
+    status: str
+    source: str
+    summary: dict
+
+
+class RuleResponse(BaseModel):
+    id: str
+    rule_type: str
+    element_category: str
+    name: str
+    priority: int
+    selector: dict
+    properties: dict
+    source_atom_ids: list[str]
+    confidence: int
+
+
+class TargetUploadResponse(BaseModel):
+    document_id: str
+    version_id: str
+    task_id: str
+    status: str
+
+
+class TargetElementResponse(BaseModel):
+    id: str
+    element_type: str
+    element_category: str | None
+    part_name: str
+    xml_path: str | None
+    text_summary: str | None
+    style_id: str | None
+    numbering_id: str | None
+    normalized: dict
+    classification: dict | None
+
+
+class MappingResponse(BaseModel):
+    id: str
+    target_element_id: str
+    profile_rule_id: str | None
+    score: int
+    strategy: str
+    rationale: dict
+
+
+class MappingCandidateResponse(BaseModel):
+    id: str
+    target_element_id: str
+    profile_rule_id: str
+    rank: int
+    score: int
+    strategy: str
+    rationale: dict
+
+
 class PageResponse(BaseModel):
     items: list
     limit: int
