@@ -244,6 +244,9 @@ class PatchPlan(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="draft", index=True)
     source: Mapped[str] = mapped_column(String(64), nullable=False, default="deterministic_v0")
     summary: Mapped[dict] = mapped_column(JsonType, nullable=False)
+    output_document_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("document_versions.id"), nullable=True
+    )
 
     operations: Mapped[list["PatchOperation"]] = relationship(cascade="all, delete-orphan")
 
@@ -267,3 +270,38 @@ class PatchOperation(Base, TimestampMixin):
     risk_level: Mapped[str] = mapped_column(String(16), nullable=False, default="P2", index=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="planned", index=True)
     rationale: Mapped[dict] = mapped_column(JsonType, nullable=False)
+
+
+class PatchExecution(Base, TimestampMixin):
+    __tablename__ = "patch_executions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    patch_plan_id: Mapped[str] = mapped_column(
+        ForeignKey("patch_plans.id"), nullable=False, index=True
+    )
+    document_version_id: Mapped[str] = mapped_column(
+        ForeignKey("document_versions.id"), nullable=False, index=True
+    )
+    output_document_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("document_versions.id"), nullable=True
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    summary: Mapped[dict] = mapped_column(JsonType, nullable=False)
+    error_message: Mapped[str | None] = mapped_column(Text)
+
+
+class RenderSnapshot(Base, TimestampMixin):
+    __tablename__ = "render_snapshots"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    document_version_id: Mapped[str] = mapped_column(
+        ForeignKey("document_versions.id"), nullable=False, index=True
+    )
+    renderer: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    renderer_version: Mapped[str | None] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    pdf_data: Mapped[bytes | None] = mapped_column(LargeBinary)
+    pdf_size_bytes: Mapped[int | None] = mapped_column(Integer)
+    page_count: Mapped[int | None] = mapped_column(Integer)
+    metrics: Mapped[dict | None] = mapped_column(JsonType)
+    error_message: Mapped[str | None] = mapped_column(Text)

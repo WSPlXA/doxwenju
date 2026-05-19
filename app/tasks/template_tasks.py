@@ -2,10 +2,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal
-from app.models.document import Document, DocumentVersion
+from app.models.document import Document, DocumentVersion, PatchPlan
 from app.services.embeddings import embed_format_atoms, embed_target_elements
 from app.services.ingestion import ingest_template_version
+from app.services.patch_engine import execute_patch_plan
 from app.services.patch_planner import rebuild_patch_plan
+from app.services.rendering import render_libreoffice_precheck
 from app.services.target_mapping import rebuild_mapping_results
 from app.tasks.celery_app import celery_app
 
@@ -73,6 +75,40 @@ def target_ingestion(document_version_id: str) -> dict:
             "status": "done",
             "mapping_count": mapping_count,
             "patch_plan_id": patch_plan_id,
+        }
+    finally:
+        db.close()
+
+
+@celery_app.task(name="patch_plan_execute")
+def patch_plan_execute(patch_plan_id: str) -> dict:
+    db: Session = SessionLocal()
+    try:
+        plan = db.get(PatchPlan, patch_plan_id)
+        if plan is None:
+            raise ValueError(f"PatchPlan not found: {patch_plan_id}")
+        execution = execute_patch_plan(db, patch_plan_id)
+        return {
+            "patch_plan_id": patch_plan_id,
+            "execution_id": execution.id,
+            "status": execution.status,
+            "output_document_version_id": execution.output_document_version_id,
+        }
+    finally:
+        db.close()
+
+
+@celery_app.task(name="render_precheck")
+def render_precheck(document_version_id: str) -> dict:
+    db: Session = SessionLocal()
+    try:
+        snapshot = render_libreoffice_precheck(db, document_version_id)
+        return {
+            "document_version_id": document_version_id,
+            "snapshot_id": snapshot.id,
+            "status": snapshot.status,
+            "renderer": snapshot.renderer,
+            "page_count": snapshot.page_count,
         }
     finally:
         db.close()

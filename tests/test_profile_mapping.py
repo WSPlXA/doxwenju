@@ -14,10 +14,14 @@ from app.models.document import (
     PatchOperation,
     PatchPlan,
     ProfileRule,
+    RenderSnapshot,
     TargetElement,
 )
+from app.services.docx_package import inspect_docx_package
 from app.services.ingestion import ingest_template_version
+from app.services.patch_engine import execute_patch_plan
 from app.services.patch_planner import rebuild_patch_plan
+from app.services.rendering import render_libreoffice_precheck
 from app.services.target_mapping import rebuild_mapping_results
 from tests.fixtures.docx_builder import build_minimal_docx
 
@@ -160,4 +164,51 @@ def test_patch_plan_is_generated_from_mapping_results():
         assert {operation.risk_level for operation in operations}
         assert any(operation.operation_type == "apply_heading_rule" for operation in operations)
     finally:
+        db.close()
+
+
+def test_patch_engine_applies_supported_operations_and_outputs_docx():
+    db = _sqlite_session()
+    try:
+        raw = build_minimal_docx()
+        template = _version(db, "template", raw)
+        target = _version(db, "target", raw)
+        ingest_template_version(db, template)
+        ingest_template_version(db, target)
+        rebuild_mapping_results(db, target.id, template.id)
+        plan = rebuild_patch_plan(db, target.id, template.id)
+        execution = execute_patch_plan(db, plan.id)
+
+        db.refresh(plan)
+        output = db.get(DocumentVersion, execution.output_document_version_id)
+        operations = db.query(PatchOperation).filter_by(patch_plan_id=plan.id).all()
+        statuses = {operation.status for operation in operations}
+
+        assert execution.status == "done"
+        assert plan.status == "applied"
+        assert output is not None
+        assert inspect_docx_package(output.raw_file)
+        assert "applied" in statuses
+        assert "skipped" in statuses
+        assert execution.summary["outputOpenabilityCheck"] == "zip_and_required_parts_valid"
+    finally:
+        db.close()
+
+
+def test_render_precheck_records_skipped_when_libreoffice_missing():
+    db = _sqlite_session()
+    original_path = settings.libreoffice_path
+    try:
+        settings.libreoffice_path = "/definitely/missing/soffice"
+        raw = build_minimal_docx()
+        target = _version(db, "output", raw)
+        snapshot = render_libreoffice_precheck(db, target.id)
+        stored = db.query(RenderSnapshot).filter_by(id=snapshot.id).one()
+
+        assert stored.status == "skipped"
+        assert stored.renderer == "libreoffice"
+        assert stored.pdf_data is None
+        assert "not found" in stored.error_message.lower()
+    finally:
+        settings.libreoffice_path = original_path
         db.close()

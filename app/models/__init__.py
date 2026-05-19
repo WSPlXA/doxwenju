@@ -7,11 +7,13 @@ from app.models.document import (
     MappingResult,
     MediaAsset,
     OOXMLPart,
+    PatchExecution,
     PatchOperation,
     PatchPlan,
     ProfileRule,
     ProviderCall,
     Relationship,
+    RenderSnapshot,
     TargetElement,
 )
 
@@ -25,9 +27,11 @@ __all__ = [
     "MediaAsset",
     "OOXMLPart",
     "PatchOperation",
+    "PatchExecution",
     "PatchPlan",
     "ProviderCall",
     "ProfileRule",
+    "RenderSnapshot",
     "Relationship",
     "TargetElement",
 ]

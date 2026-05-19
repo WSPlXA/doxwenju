@@ -1,6 +1,6 @@
 import hashlib
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -11,21 +11,27 @@ from app.models.document import (
     DocumentVersion,
     MappingCandidate,
     MappingResult,
+    PatchExecution,
     PatchOperation,
     PatchPlan,
+    RenderSnapshot,
     TargetElement,
 )
 from app.schemas.template import (
     MappingCandidateResponse,
     MappingResponse,
     PageResponse,
+    PatchExecuteResponse,
+    PatchExecutionResponse,
     PatchOperationResponse,
     PatchPlanResponse,
+    RenderPrecheckResponse,
+    RenderSnapshotResponse,
     TargetElementResponse,
     TargetUploadResponse,
     TemplateStatusResponse,
 )
-from app.tasks.template_tasks import target_ingestion
+from app.tasks.template_tasks import patch_plan_execute, render_precheck, target_ingestion
 
 router = APIRouter(prefix="/targets", tags=["targets"])
 
@@ -137,6 +143,123 @@ def latest_target_elements(
     return PageResponse(items=items, limit=limit, offset=offset, total=total)
 
 
+@router.post("/latest/patch-plan/execute", response_model=PatchExecuteResponse)
+def execute_latest_target_patch_plan(db: Session = Depends(get_db)):
+    version = _latest_target_version(db)
+    if version is None:
+        raise HTTPException(status_code=404, detail="No target document")
+    plan = db.scalar(
+        select(PatchPlan)
+        .where(PatchPlan.document_version_id == version.id)
+        .order_by(PatchPlan.created_at.desc())
+        .limit(1)
+    )
+    if plan is None:
+        raise HTTPException(status_code=404, detail="No patch plan for latest target")
+    task = patch_plan_execute.delay(plan.id)
+    return PatchExecuteResponse(patch_plan_id=plan.id, task_id=task.id, status="queued")
+
+
+@router.get("/latest/patch-plan/execution", response_model=PatchExecutionResponse)
+def latest_target_patch_execution(db: Session = Depends(get_db)):
+    version = _latest_target_version(db)
+    if version is None:
+        raise HTTPException(status_code=404, detail="No target document")
+    plan = db.scalar(
+        select(PatchPlan)
+        .where(PatchPlan.document_version_id == version.id)
+        .order_by(PatchPlan.created_at.desc())
+        .limit(1)
+    )
+    if plan is None:
+        raise HTTPException(status_code=404, detail="No patch plan for latest target")
+    execution = db.scalar(
+        select(PatchExecution)
+        .where(PatchExecution.patch_plan_id == plan.id)
+        .order_by(PatchExecution.created_at.desc())
+        .limit(1)
+    )
+    if execution is None:
+        raise HTTPException(status_code=404, detail="No patch execution for latest target")
+    return PatchExecutionResponse(
+        id=execution.id,
+        patch_plan_id=execution.patch_plan_id,
+        document_version_id=execution.document_version_id,
+        output_document_version_id=execution.output_document_version_id,
+        status=execution.status,
+        summary=execution.summary,
+        error_message=execution.error_message,
+    )
+
+
+@router.get("/latest/output.docx")
+def download_latest_target_output(db: Session = Depends(get_db)):
+    version = _latest_target_version(db)
+    if version is None:
+        raise HTTPException(status_code=404, detail="No target document")
+    plan = db.scalar(
+        select(PatchPlan)
+        .where(PatchPlan.document_version_id == version.id)
+        .order_by(PatchPlan.created_at.desc())
+        .limit(1)
+    )
+    if plan is None or plan.output_document_version_id is None:
+        raise HTTPException(status_code=404, detail="No patched output for latest target")
+    output = db.get(DocumentVersion, plan.output_document_version_id)
+    if output is None:
+        raise HTTPException(status_code=404, detail="Output document version is missing")
+    return Response(
+        content=output.raw_file,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{output.filename}"'},
+    )
+
+
+@router.post("/latest/render-precheck", response_model=RenderPrecheckResponse)
+def run_latest_target_render_precheck(db: Session = Depends(get_db)):
+    output = _latest_output_version(db)
+    if output is None:
+        raise HTTPException(status_code=404, detail="No patched output for latest target")
+    task = render_precheck.delay(output.id)
+    return RenderPrecheckResponse(document_version_id=output.id, task_id=task.id, status="queued")
+
+
+@router.get("/latest/render-snapshot", response_model=RenderSnapshotResponse)
+def latest_target_render_snapshot(db: Session = Depends(get_db)):
+    output = _latest_output_version(db)
+    if output is None:
+        raise HTTPException(status_code=404, detail="No patched output for latest target")
+    snapshot = db.scalar(
+        select(RenderSnapshot)
+        .where(RenderSnapshot.document_version_id == output.id)
+        .order_by(RenderSnapshot.created_at.desc())
+        .limit(1)
+    )
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="No render snapshot for latest output")
+    return _render_snapshot_response(snapshot)
+
+
+@router.get("/latest/render.pdf")
+def download_latest_target_render_pdf(db: Session = Depends(get_db)):
+    output = _latest_output_version(db)
+    if output is None:
+        raise HTTPException(status_code=404, detail="No patched output for latest target")
+    snapshot = db.scalar(
+        select(RenderSnapshot)
+        .where(RenderSnapshot.document_version_id == output.id)
+        .order_by(RenderSnapshot.created_at.desc())
+        .limit(1)
+    )
+    if snapshot is None or snapshot.pdf_data is None:
+        raise HTTPException(status_code=404, detail="No rendered PDF for latest output")
+    return Response(
+        content=snapshot.pdf_data,
+        media_type="application/pdf",
+        headers={"Content-Disposition": 'attachment; filename="render.pdf"'},
+    )
+
+
 @router.get("/latest/patch-plan", response_model=PatchPlanResponse)
 def latest_target_patch_plan(db: Session = Depends(get_db)):
     version = _latest_target_version(db)
@@ -210,6 +333,36 @@ def latest_target_patch_operations(
         for operation in operations
     ]
     return PageResponse(items=items, limit=limit, offset=offset, total=total)
+
+
+def _latest_output_version(db: Session) -> DocumentVersion | None:
+    version = _latest_target_version(db)
+    if version is None:
+        return None
+    plan = db.scalar(
+        select(PatchPlan)
+        .where(PatchPlan.document_version_id == version.id)
+        .where(PatchPlan.output_document_version_id.is_not(None))
+        .order_by(PatchPlan.created_at.desc())
+        .limit(1)
+    )
+    if plan is None or plan.output_document_version_id is None:
+        return None
+    return db.get(DocumentVersion, plan.output_document_version_id)
+
+
+def _render_snapshot_response(snapshot: RenderSnapshot) -> RenderSnapshotResponse:
+    return RenderSnapshotResponse(
+        id=snapshot.id,
+        document_version_id=snapshot.document_version_id,
+        renderer=snapshot.renderer,
+        renderer_version=snapshot.renderer_version,
+        status=snapshot.status,
+        pdf_size_bytes=snapshot.pdf_size_bytes,
+        page_count=snapshot.page_count,
+        metrics=snapshot.metrics,
+        error_message=snapshot.error_message,
+    )
 
 
 @router.get("/latest/mappings/{mapping_id}/candidates", response_model=PageResponse)

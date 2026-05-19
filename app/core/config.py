@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     gemini_rerank_model: str = "gemini-2.5-flash"
     gemini_rerank_timeout_seconds: int = 45
     gemini_rerank_max_elements_per_run: int = 50
+    libreoffice_path: str | None = None
+    libreoffice_timeout_seconds: int = 120
     moonshot_api_key: str | None = None
     microsoft_graph_tenant_id: str | None = None
     microsoft_graph_client_id: str | None = None

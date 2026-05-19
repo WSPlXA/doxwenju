@@ -129,6 +129,40 @@ class PatchOperationResponse(BaseModel):
     rationale: dict
 
 
+class PatchExecuteResponse(BaseModel):
+    patch_plan_id: str
+    task_id: str
+    status: str
+
+
+class PatchExecutionResponse(BaseModel):
+    id: str
+    patch_plan_id: str
+    document_version_id: str
+    output_document_version_id: str | None
+    status: str
+    summary: dict
+    error_message: str | None
+
+
+class RenderPrecheckResponse(BaseModel):
+    document_version_id: str
+    task_id: str
+    status: str
+
+
+class RenderSnapshotResponse(BaseModel):
+    id: str
+    document_version_id: str
+    renderer: str
+    renderer_version: str | None
+    status: str
+    pdf_size_bytes: int | None
+    page_count: int | None
+    metrics: dict | None
+    error_message: str | None
+
+
 class PageResponse(BaseModel):
     items: list
     limit: int

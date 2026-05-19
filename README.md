@@ -37,6 +37,12 @@ curl http://localhost:8000/targets/latest/mappings
 curl http://localhost:8000/targets/latest/mappings/{mapping_id}/candidates
 curl http://localhost:8000/targets/latest/patch-plan
 curl http://localhost:8000/targets/latest/patch-plan/operations
+curl -X POST http://localhost:8000/targets/latest/patch-plan/execute
+curl http://localhost:8000/targets/latest/patch-plan/execution
+curl -OJ http://localhost:8000/targets/latest/output.docx
+curl -X POST http://localhost:8000/targets/latest/render-precheck
+curl http://localhost:8000/targets/latest/render-snapshot
+curl -OJ http://localhost:8000/targets/latest/render.pdf
 ```
 
 ## Scope
@@ -57,11 +63,16 @@ Implemented in this MVP:
 - Optional Gemini structured-output rerank for top mapping candidates, with deterministic
   fallback when disabled or unavailable.
 - Draft-only deterministic patch plans and patch operations generated from mapping results.
+- Conservative OOXML patch execution v0 for paragraph-like operations, producing a new
+  output DOCX while skipping tables, images, notes, headers, and footers.
+- LibreOffice headless render precheck for patched outputs, storing PDF bytes when
+  LibreOffice is available and a skipped snapshot when it is not installed.
 
 Reserved for later phases:
 
 - Gemini profile generation and visual review calls.
-- OOXML patch execution.
+- Specialized OOXML patch execution for tables, images, notes, headers, and footers.
+- Microsoft Graph / Word rendering as final visual truth.
 - OOXML patch engine.
 - Word/Graph and LibreOffice rendering.
 - Multi-agent review and auto-repair.
