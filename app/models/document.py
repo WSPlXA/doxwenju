@@ -305,36 +305,3 @@ class RenderSnapshot(Base, TimestampMixin):
     page_count: Mapped[int | None] = mapped_column(Integer)
     metrics: Mapped[dict | None] = mapped_column(JsonType)
     error_message: Mapped[str | None] = mapped_column(Text)
-
-
-class ReviewReport(Base, TimestampMixin):
-    __tablename__ = "review_reports"
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    document_version_id: Mapped[str] = mapped_column(
-        ForeignKey("document_versions.id"), nullable=False, index=True
-    )
-    patch_plan_id: Mapped[str | None] = mapped_column(ForeignKey("patch_plans.id"))
-    render_snapshot_id: Mapped[str | None] = mapped_column(ForeignKey("render_snapshots.id"))
-    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
-    source: Mapped[str] = mapped_column(String(64), nullable=False)
-    summary: Mapped[dict] = mapped_column(JsonType, nullable=False)
-    report_json: Mapped[dict] = mapped_column(JsonType, nullable=False)
-
-
-class ReviewFinding(Base, TimestampMixin):
-    __tablename__ = "review_findings"
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    review_report_id: Mapped[str] = mapped_column(
-        ForeignKey("review_reports.id"), nullable=False, index=True
-    )
-    document_version_id: Mapped[str] = mapped_column(
-        ForeignKey("document_versions.id"), nullable=False, index=True
-    )
-    patch_operation_id: Mapped[str | None] = mapped_column(ForeignKey("patch_operations.id"))
-    severity: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
-    category: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
-    message: Mapped[str] = mapped_column(Text, nullable=False)
-    evidence: Mapped[dict] = mapped_column(JsonType, nullable=False)
-    status: Mapped[str] = mapped_column(String(32), nullable=False, default="open", index=True)

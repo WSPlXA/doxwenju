@@ -14,8 +14,6 @@ from app.models.document import (
     ProviderCall,
     Relationship,
     RenderSnapshot,
-    ReviewFinding,
-    ReviewReport,
     TargetElement,
 )
 
@@ -35,7 +33,5 @@ __all__ = [
     "ProfileRule",
     "RenderSnapshot",
     "Relationship",
-    "ReviewFinding",
-    "ReviewReport",
     "TargetElement",
 ]

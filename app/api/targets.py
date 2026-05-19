@@ -18,6 +18,7 @@ from app.models.document import (
     TargetElement,
 )
 from app.schemas.template import (
+    AutoRepairResponse,
     MappingCandidateResponse,
     MappingResponse,
     PageResponse,
@@ -31,7 +32,12 @@ from app.schemas.template import (
     TargetUploadResponse,
     TemplateStatusResponse,
 )
-from app.tasks.template_tasks import patch_plan_execute, render_precheck, target_ingestion
+from app.tasks.template_tasks import (
+    auto_repair_cycle,
+    patch_plan_execute,
+    render_precheck,
+    target_ingestion,
+)
 
 router = APIRouter(prefix="/targets", tags=["targets"])
 
@@ -158,6 +164,24 @@ def execute_latest_target_patch_plan(db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="No patch plan for latest target")
     task = patch_plan_execute.delay(plan.id)
     return PatchExecuteResponse(patch_plan_id=plan.id, task_id=task.id, status="queued")
+
+
+@router.post("/latest/auto-repair", response_model=AutoRepairResponse)
+def run_latest_target_auto_repair(db: Session = Depends(get_db)):
+    version = _latest_target_version(db)
+    if version is None:
+        raise HTTPException(status_code=404, detail="No target document")
+    plan = db.scalar(
+        select(PatchPlan)
+        .where(PatchPlan.document_version_id == version.id)
+        .where(PatchPlan.output_document_version_id.is_not(None))
+        .order_by(PatchPlan.created_at.desc())
+        .limit(1)
+    )
+    if plan is None:
+        raise HTTPException(status_code=404, detail="No executed patch plan for latest target")
+    task = auto_repair_cycle.delay(plan.id)
+    return AutoRepairResponse(source_patch_plan_id=plan.id, task_id=task.id, status="queued")
 
 
 @router.get("/latest/patch-plan/execution", response_model=PatchExecutionResponse)

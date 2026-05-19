@@ -22,6 +22,7 @@ from app.services.ingestion import ingest_template_version
 from app.services.patch_engine import execute_patch_plan
 from app.services.patch_planner import rebuild_patch_plan
 from app.services.rendering import render_libreoffice_precheck
+from app.services.repair_planner import build_internal_repair_plan
 from app.services.target_mapping import rebuild_mapping_results
 from tests.fixtures.docx_builder import build_minimal_docx
 
@@ -190,7 +191,85 @@ def test_patch_engine_applies_supported_operations_and_outputs_docx():
         assert inspect_docx_package(output.raw_file)
         assert "applied" in statuses
         assert "skipped" in statuses
+        assert (
+            db.query(PatchOperation)
+            .filter_by(patch_plan_id=plan.id, operation_type="apply_table_rule", status="applied")
+            .count()
+            >= 1
+        )
+        assert (
+            db.query(PatchOperation)
+            .filter_by(
+                patch_plan_id=plan.id,
+                operation_type="apply_footnote_rule",
+                status="applied",
+            )
+            .count()
+            >= 1
+        )
+        assert (
+            db.query(PatchOperation)
+            .filter_by(
+                patch_plan_id=plan.id,
+                operation_type="apply_header_footer_rule",
+                status="applied",
+            )
+            .count()
+            >= 1
+        )
         assert execution.summary["outputOpenabilityCheck"] == "zip_and_required_parts_valid"
+    finally:
+        db.close()
+
+
+def test_internal_repair_plan_retries_supported_skipped_operations():
+    db = _sqlite_session()
+    try:
+        raw = build_minimal_docx()
+        template = _version(db, "template", raw)
+        target = _version(db, "target", raw)
+        ingest_template_version(db, template)
+        ingest_template_version(db, target)
+        rebuild_mapping_results(db, target.id, template.id)
+        plan = rebuild_patch_plan(db, target.id, template.id)
+        execution = execute_patch_plan(db, plan.id)
+
+        operation = (
+            db.query(PatchOperation)
+            .filter_by(
+                patch_plan_id=plan.id,
+                operation_type="apply_header_footer_rule",
+                status="applied",
+            )
+            .first()
+        )
+        assert operation is not None
+        operation.status = "skipped"
+        operation.rationale = {
+            **operation.rationale,
+            "skipReason": "unsupported_in_patch_engine_v0",
+        }
+        db.add(operation)
+        db.commit()
+
+        repair_plan = build_internal_repair_plan(db, plan.id)
+
+        assert repair_plan is not None
+        assert repair_plan.round_number == 2
+        assert repair_plan.source == "internal_repair_v0"
+        assert repair_plan.document_version_id == execution.output_document_version_id
+        repair_execution = execute_patch_plan(db, repair_plan.id)
+        assert repair_execution.status == "done"
+        assert (
+            db.query(PatchOperation)
+            .filter_by(
+                patch_plan_id=repair_plan.id,
+                operation_type="apply_header_footer_rule",
+                status="applied",
+            )
+            .count()
+            == 1
+        )
     finally:
         db.close()
 

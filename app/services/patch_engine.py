@@ -24,6 +24,10 @@ ET.register_namespace("wp", NS["wp"])
 ET.register_namespace("a", NS["a"])
 
 SUPPORTED_OPERATIONS = {
+    "apply_endnote_rule",
+    "apply_footnote_rule",
+    "apply_header_footer_rule",
+    "apply_table_rule",
     "apply_heading_rule",
     "apply_list_rule",
     "apply_caption_rule",
@@ -80,6 +84,9 @@ def _apply_plan_to_docx(db: Session, raw_file: bytes, plan: PatchPlan) -> tuple[
         raise ValueError("DOCX is missing word/document.xml")
     root = parse_xml(document_xml)
     paragraphs = root.findall("./w:body/w:p", NS)
+    tables = root.findall("./w:body/w:tbl", NS)
+    note_roots = _parse_note_roots(parts)
+    header_footer_roots = _parse_header_footer_roots(parts)
 
     operations = list(
         db.scalars(
@@ -99,22 +106,22 @@ def _apply_plan_to_docx(db: Session, raw_file: bytes, plan: PatchPlan) -> tuple[
             counts["skipped"] += 1
             db.add(operation)
             continue
-        paragraph = _paragraph_for_operation(paragraphs, operation)
-        if paragraph is None:
-            operation.status = "skipped"
-            operation.rationale = {
-                **(operation.rationale or {}),
-                "skipReason": "paragraph_not_found_or_not_top_level",
-            }
+        applied = _apply_supported_operation(
+            paragraphs, tables, note_roots, header_footer_roots, operation
+        )
+        if not applied:
             counts["skipped"] += 1
             db.add(operation)
             continue
-        _apply_paragraph_properties(paragraph, operation.payload)
         operation.status = "applied"
         counts["applied"] += 1
         db.add(operation)
 
     parts["word/document.xml"] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+    for part_name, note_root in note_roots.items():
+        parts[part_name] = ET.tostring(note_root, encoding="utf-8", xml_declaration=True)
+    for part_name, part_root in header_footer_roots.items():
+        parts[part_name] = ET.tostring(part_root, encoding="utf-8", xml_declaration=True)
     output = _zip_parts(parts)
     inspect_docx_package(output)
     db.commit()
@@ -124,6 +131,61 @@ def _apply_plan_to_docx(db: Session, raw_file: bytes, plan: PatchPlan) -> tuple[
         "supportedOperations": sorted(SUPPORTED_OPERATIONS),
         "outputOpenabilityCheck": "zip_and_required_parts_valid",
     }
+
+
+def _apply_supported_operation(
+    paragraphs: list[ET.Element],
+    tables: list[ET.Element],
+    note_roots: dict[str, ET.Element],
+    header_footer_roots: dict[str, ET.Element],
+    operation: PatchOperation,
+) -> bool:
+    if operation.operation_type == "apply_table_rule":
+        table = _table_for_operation(tables, operation)
+        if table is None:
+            operation.status = "skipped"
+            operation.rationale = {
+                **(operation.rationale or {}),
+                "skipReason": "table_not_found_or_not_top_level",
+            }
+            return False
+        _apply_table_properties(table, operation.payload)
+        return True
+
+    if operation.operation_type in {"apply_footnote_rule", "apply_endnote_rule"}:
+        paragraph = _note_paragraph_for_operation(note_roots, operation)
+        if paragraph is None:
+            operation.status = "skipped"
+            operation.rationale = {
+                **(operation.rationale or {}),
+                "skipReason": "note_paragraph_not_found_or_not_paragraph_level",
+            }
+            return False
+        _apply_paragraph_properties(paragraph, operation.payload)
+        return True
+
+    if operation.operation_type == "apply_header_footer_rule":
+        paragraph = _part_paragraph_for_operation(header_footer_roots, operation)
+        if paragraph is None:
+            operation.status = "skipped"
+            operation.rationale = {
+                **(operation.rationale or {}),
+                "skipReason": "header_footer_paragraph_not_found",
+            }
+            return False
+        _apply_paragraph_properties(paragraph, operation.payload)
+        return True
+
+    paragraph = _paragraph_for_operation(paragraphs, operation)
+    if paragraph is None:
+        operation.status = "skipped"
+        operation.rationale = {
+            **(operation.rationale or {}),
+            "skipReason": "paragraph_not_found_or_not_top_level",
+        }
+        return False
+    _apply_paragraph_properties(paragraph, operation.payload)
+    return True
 
 
 def _paragraph_for_operation(
@@ -139,6 +201,85 @@ def _paragraph_for_operation(
     if index < 0 or index >= len(paragraphs):
         return None
     return paragraphs[index]
+
+
+def _parse_note_roots(parts: dict[str, bytes]) -> dict[str, ET.Element]:
+    roots: dict[str, ET.Element] = {}
+    for part_name in ("word/footnotes.xml", "word/endnotes.xml"):
+        if part_name in parts:
+            roots[part_name] = parse_xml(parts[part_name])
+    return roots
+
+
+def _parse_header_footer_roots(parts: dict[str, bytes]) -> dict[str, ET.Element]:
+    roots: dict[str, ET.Element] = {}
+    for part_name, data in parts.items():
+        if re.fullmatch(r"word/(header|footer)\d+\.xml", part_name):
+            roots[part_name] = parse_xml(data)
+    return roots
+
+
+def _part_paragraph_for_operation(
+    part_roots: dict[str, ET.Element], operation: PatchOperation
+) -> ET.Element | None:
+    root = part_roots.get(operation.part_name)
+    if root is None:
+        return None
+    xml_path = operation.xml_path or ""
+    match = re.search(r"/w:p\[(\d+)\]$", xml_path)
+    if not match:
+        return None
+    index = int(match.group(1)) - 1
+    paragraphs = root.findall(".//w:p", NS)
+    if index < 0 or index >= len(paragraphs):
+        return None
+    return paragraphs[index]
+
+
+def _note_paragraph_for_operation(
+    note_roots: dict[str, ET.Element], operation: PatchOperation
+) -> ET.Element | None:
+    expected_part = (
+        "word/footnotes.xml"
+        if operation.operation_type == "apply_footnote_rule"
+        else "word/endnotes.xml"
+    )
+    if operation.part_name != expected_part:
+        return None
+
+    root = note_roots.get(expected_part)
+    if root is None:
+        return None
+
+    note_local = "footnote" if operation.operation_type == "apply_footnote_rule" else "endnote"
+    xml_path = operation.xml_path or ""
+    match = re.search(rf"/w:{note_local}s/w:{note_local}\[(\d+)\]/w:p\[(\d+)\]$", xml_path)
+    if not match:
+        return None
+
+    note_index = int(match.group(1)) - 1
+    paragraph_index = int(match.group(2)) - 1
+    notes = root.findall(f"w:{note_local}", NS)
+    if note_index < 0 or note_index >= len(notes):
+        return None
+
+    paragraphs = notes[note_index].findall("w:p", NS)
+    if paragraph_index < 0 or paragraph_index >= len(paragraphs):
+        return None
+    return paragraphs[paragraph_index]
+
+
+def _table_for_operation(tables: list[ET.Element], operation: PatchOperation) -> ET.Element | None:
+    if operation.part_name != "word/document.xml":
+        return None
+    xml_path = operation.xml_path or ""
+    match = re.search(r"/w:tbl\[(\d+)\]$", xml_path)
+    if not match:
+        return None
+    index = int(match.group(1)) - 1
+    if index < 0 or index >= len(tables):
+        return None
+    return tables[index]
 
 
 def _apply_paragraph_properties(paragraph: ET.Element, payload: dict) -> None:
@@ -163,6 +304,21 @@ def _apply_paragraph_properties(paragraph: ET.Element, payload: dict) -> None:
         _set_attrs_child(p_pr, "ind", effective["indent"])
     if isinstance(effective.get("numbering"), dict):
         _set_numbering(p_pr, effective["numbering"])
+
+
+def _apply_table_properties(table: ET.Element, payload: dict) -> None:
+    rule = payload.get("ruleProperties", {})
+    representative = rule.get("representative", {})
+    table_props = representative.get("properties") or rule.get("properties") or {}
+    if not table_props:
+        return
+    tbl_pr = _get_or_insert_first(table, qn("w", "tblPr"))
+    if isinstance(table_props.get("width"), dict):
+        _set_attrs_child(tbl_pr, "tblW", table_props["width"])
+    if isinstance(table_props.get("borders"), dict):
+        _set_table_borders(tbl_pr, table_props["borders"])
+    if isinstance(table_props.get("cellMargins"), dict):
+        _set_table_cell_margins(tbl_pr, table_props["cellMargins"])
 
 
 def _get_or_insert_first(parent: ET.Element, tag: str) -> ET.Element:
@@ -213,6 +369,36 @@ def _set_numbering(parent: ET.Element, numbering: dict) -> None:
         _set_single_val_child(num_pr, "ilvl", str(numbering["level"]))
     if numbering.get("numId") is not None:
         _set_single_val_child(num_pr, "numId", str(numbering["numId"]))
+
+
+def _set_table_borders(tbl_pr: ET.Element, borders: dict) -> None:
+    tbl_borders = tbl_pr.find("w:tblBorders", NS)
+    if tbl_borders is None:
+        tbl_borders = ET.SubElement(tbl_pr, qn("w", "tblBorders"))
+    for border_name, attrs in borders.items():
+        if not isinstance(attrs, dict):
+            continue
+        border = tbl_borders.find(f"w:{border_name}", NS)
+        if border is None:
+            border = ET.SubElement(tbl_borders, qn("w", border_name))
+        for key, value in attrs.items():
+            if value is not None:
+                border.set(qn("w", key), str(value))
+
+
+def _set_table_cell_margins(tbl_pr: ET.Element, margins: dict) -> None:
+    tbl_cell_mar = tbl_pr.find("w:tblCellMar", NS)
+    if tbl_cell_mar is None:
+        tbl_cell_mar = ET.SubElement(tbl_pr, qn("w", "tblCellMar"))
+    for margin_name, attrs in margins.items():
+        if not isinstance(attrs, dict):
+            continue
+        margin = tbl_cell_mar.find(f"w:{margin_name}", NS)
+        if margin is None:
+            margin = ET.SubElement(tbl_cell_mar, qn("w", margin_name))
+        for key, value in attrs.items():
+            if value is not None:
+                margin.set(qn("w", key), str(value))
 
 
 def _zip_parts(parts: dict[str, bytes]) -> bytes:

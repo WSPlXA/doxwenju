@@ -135,6 +135,12 @@ class PatchExecuteResponse(BaseModel):
     status: str
 
 
+class AutoRepairResponse(BaseModel):
+    source_patch_plan_id: str
+    task_id: str
+    status: str
+
+
 class PatchExecutionResponse(BaseModel):
     id: str
     patch_plan_id: str

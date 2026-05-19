@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     gemini_rerank_model: str = "gemini-2.5-flash"
     gemini_rerank_timeout_seconds: int = 45
     gemini_rerank_max_elements_per_run: int = 50
+    gemini_repair_enabled: bool = True
+    gemini_repair_model: str = "gemini-2.5-flash"
+    gemini_repair_timeout_seconds: int = 45
+    gemini_repair_max_operations_per_run: int = 30
     libreoffice_path: str | None = None
     libreoffice_timeout_seconds: int = 120
     moonshot_api_key: str | None = None

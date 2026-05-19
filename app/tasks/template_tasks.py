@@ -8,6 +8,7 @@ from app.services.ingestion import ingest_template_version
 from app.services.patch_engine import execute_patch_plan
 from app.services.patch_planner import rebuild_patch_plan
 from app.services.rendering import render_libreoffice_precheck
+from app.services.repair_planner import build_internal_repair_plan
 from app.services.target_mapping import rebuild_mapping_results
 from app.tasks.celery_app import celery_app
 
@@ -109,6 +110,29 @@ def render_precheck(document_version_id: str) -> dict:
             "status": snapshot.status,
             "renderer": snapshot.renderer,
             "page_count": snapshot.page_count,
+        }
+    finally:
+        db.close()
+
+
+@celery_app.task(name="auto_repair_cycle")
+def auto_repair_cycle(patch_plan_id: str) -> dict:
+    db: Session = SessionLocal()
+    try:
+        repair_plan = build_internal_repair_plan(db, patch_plan_id)
+        if repair_plan is None:
+            return {
+                "source_patch_plan_id": patch_plan_id,
+                "status": "no_repair_needed",
+                "repair_patch_plan_id": None,
+            }
+        execution = execute_patch_plan(db, repair_plan.id)
+        return {
+            "source_patch_plan_id": patch_plan_id,
+            "status": execution.status,
+            "repair_patch_plan_id": repair_plan.id,
+            "execution_id": execution.id,
+            "output_document_version_id": execution.output_document_version_id,
         }
     finally:
         db.close()
