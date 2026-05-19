@@ -60,6 +60,7 @@ class DocumentVersion(Base, TimestampMixin):
     relationships: Mapped[list["Relationship"]] = relationship(cascade="all, delete-orphan")
     media_assets: Mapped[list["MediaAsset"]] = relationship(cascade="all, delete-orphan")
     format_atoms: Mapped[list["FormatAtom"]] = relationship(cascade="all, delete-orphan")
+    target_elements: Mapped[list["TargetElement"]] = relationship(cascade="all, delete-orphan")
 
 
 class OOXMLPart(Base, TimestampMixin):
@@ -146,3 +147,69 @@ class ProviderCall(Base, TimestampMixin):
     output_tokens: Mapped[int | None] = mapped_column(Integer)
     duration_ms: Mapped[int | None] = mapped_column(Integer)
     error_message: Mapped[str | None] = mapped_column(Text)
+
+
+class FormatProfile(Base, TimestampMixin):
+    __tablename__ = "format_profiles"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    document_version_id: Mapped[str] = mapped_column(
+        ForeignKey("document_versions.id"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active", index=True)
+    summary: Mapped[dict] = mapped_column(JsonType, nullable=False)
+    source: Mapped[str] = mapped_column(String(64), nullable=False, default="deterministic_v0")
+
+    rules: Mapped[list["ProfileRule"]] = relationship(cascade="all, delete-orphan")
+
+
+class ProfileRule(Base, TimestampMixin):
+    __tablename__ = "profile_rules"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    profile_id: Mapped[str] = mapped_column(ForeignKey("format_profiles.id"), nullable=False)
+    document_version_id: Mapped[str] = mapped_column(
+        ForeignKey("document_versions.id"), nullable=False, index=True
+    )
+    rule_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    element_category: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
+    selector: Mapped[dict] = mapped_column(JsonType, nullable=False)
+    properties: Mapped[dict] = mapped_column(JsonType, nullable=False)
+    source_atom_ids: Mapped[list[str]] = mapped_column(JsonType, nullable=False, default=list)
+    confidence: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
+
+
+class TargetElement(Base, TimestampMixin):
+    __tablename__ = "target_elements"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    document_version_id: Mapped[str] = mapped_column(
+        ForeignKey("document_versions.id"), nullable=False, index=True
+    )
+    source_atom_id: Mapped[str | None] = mapped_column(ForeignKey("format_atoms.id"))
+    element_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    element_category: Mapped[str | None] = mapped_column(String(128), index=True)
+    part_name: Mapped[str] = mapped_column(String(512), nullable=False, index=True)
+    xml_path: Mapped[str | None] = mapped_column(String(1024))
+    text_summary: Mapped[str | None] = mapped_column(Text)
+    style_id: Mapped[str | None] = mapped_column(String(255), index=True)
+    numbering_id: Mapped[str | None] = mapped_column(String(255), index=True)
+    normalized: Mapped[dict] = mapped_column(JsonType, nullable=False)
+    classification: Mapped[dict | None] = mapped_column(JsonType)
+
+
+class MappingResult(Base, TimestampMixin):
+    __tablename__ = "mapping_results"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    target_element_id: Mapped[str] = mapped_column(
+        ForeignKey("target_elements.id"), nullable=False, index=True
+    )
+    profile_rule_id: Mapped[str | None] = mapped_column(ForeignKey("profile_rules.id"))
+    score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    strategy: Mapped[str] = mapped_column(String(64), nullable=False)
+    rationale: Mapped[dict] = mapped_column(JsonType, nullable=False)

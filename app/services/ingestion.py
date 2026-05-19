@@ -1,10 +1,21 @@
 from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
-from app.models.document import DocumentVersion, FormatAtom, MediaAsset, OOXMLPart, Relationship
+from app.models.document import (
+    DocumentVersion,
+    FormatAtom,
+    FormatProfile,
+    MappingResult,
+    MediaAsset,
+    OOXMLPart,
+    ProfileRule,
+    Relationship,
+    TargetElement,
+)
 from app.services.atoms import body_atoms, document_setup_atoms, header_footer_atoms, note_atoms
 from app.services.docx_package import DocxSecurityError, PackagePart, inspect_docx_package
 from app.services.ooxml import image_size, parse_numbering, parse_relationships, parse_styles
+from app.services.profile_builder import rebuild_deterministic_profile
 
 
 def ingest_template_version(db: Session, version: DocumentVersion) -> None:
@@ -25,6 +36,8 @@ def ingest_template_version(db: Session, version: DocumentVersion) -> None:
         numbering_info = parse_numbering(_part_text(part_by_name.get("word/numbering.xml")))
         atoms = _build_atoms(part_by_name, styles_info, numbering_info)
         _store_atoms(db, version.id, atoms)
+        if version.document.kind == "template":
+            rebuild_deterministic_profile(db, version.id, f"{version.filename} profile")
         _set_status(db, version, "done", 100)
     except (DocxSecurityError, ValueError) as exc:
         _set_status(db, version, "failed", version.progress, str(exc))
@@ -50,7 +63,16 @@ def _set_status(
 
 
 def _clear_existing_parse(db: Session, version_id: str) -> None:
-    for model in (FormatAtom, MediaAsset, Relationship, OOXMLPart):
+    for model in (
+        MappingResult,
+        TargetElement,
+        ProfileRule,
+        FormatProfile,
+        FormatAtom,
+        MediaAsset,
+        Relationship,
+        OOXMLPart,
+    ):
         db.execute(delete(model).where(model.document_version_id == version_id))
     db.commit()
 
