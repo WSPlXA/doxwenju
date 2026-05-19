@@ -11,10 +11,13 @@ from app.models.document import (
     FormatProfile,
     MappingCandidate,
     MappingResult,
+    PatchOperation,
+    PatchPlan,
     ProfileRule,
     TargetElement,
 )
 from app.services.ingestion import ingest_template_version
+from app.services.patch_planner import rebuild_patch_plan
 from app.services.target_mapping import rebuild_mapping_results
 from tests.fixtures.docx_builder import build_minimal_docx
 
@@ -133,4 +136,28 @@ def test_mapping_uses_rerank_when_available(monkeypatch):
         settings.gemini_api_key = original_key
         settings.gemini_rerank_enabled = original_enabled
         settings.gemini_rerank_max_elements_per_run = original_limit
+        db.close()
+
+
+def test_patch_plan_is_generated_from_mapping_results():
+    db = _sqlite_session()
+    try:
+        raw = build_minimal_docx()
+        template = _version(db, "template", raw)
+        target = _version(db, "target", raw)
+        ingest_template_version(db, template)
+        ingest_template_version(db, target)
+        rebuild_mapping_results(db, target.id, template.id)
+        plan = rebuild_patch_plan(db, target.id, template.id)
+
+        operations = db.query(PatchOperation).filter_by(patch_plan_id=plan.id).all()
+        stored_plan = db.query(PatchPlan).filter_by(id=plan.id).one()
+
+        assert stored_plan.status == "draft"
+        assert stored_plan.summary["operationCount"] == len(operations)
+        assert operations
+        assert all(operation.status == "planned" for operation in operations)
+        assert {operation.risk_level for operation in operations}
+        assert any(operation.operation_type == "apply_heading_rule" for operation in operations)
+    finally:
         db.close()

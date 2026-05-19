@@ -10,6 +10,8 @@ from app.models.document import (
     MappingResult,
     MediaAsset,
     OOXMLPart,
+    PatchOperation,
+    PatchPlan,
     ProfileRule,
     Relationship,
     TargetElement,
@@ -84,6 +86,9 @@ def _set_status(
 
 def _clear_existing_parse(db: Session, version_id: str) -> None:
     target_ids = select(TargetElement.id).where(TargetElement.document_version_id == version_id)
+    plan_ids = select(PatchPlan.id).where(PatchPlan.document_version_id == version_id)
+    db.execute(delete(PatchOperation).where(PatchOperation.patch_plan_id.in_(plan_ids)))
+    db.execute(delete(PatchPlan).where(PatchPlan.document_version_id == version_id))
     db.execute(delete(MappingCandidate).where(MappingCandidate.target_element_id.in_(target_ids)))
     db.execute(delete(MappingResult).where(MappingResult.target_element_id.in_(target_ids)))
     for model in (

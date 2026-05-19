@@ -11,12 +11,16 @@ from app.models.document import (
     DocumentVersion,
     MappingCandidate,
     MappingResult,
+    PatchOperation,
+    PatchPlan,
     TargetElement,
 )
 from app.schemas.template import (
     MappingCandidateResponse,
     MappingResponse,
     PageResponse,
+    PatchOperationResponse,
+    PatchPlanResponse,
     TargetElementResponse,
     TargetUploadResponse,
     TemplateStatusResponse,
@@ -129,6 +133,81 @@ def latest_target_elements(
             classification=element.classification,
         )
         for element in elements
+    ]
+    return PageResponse(items=items, limit=limit, offset=offset, total=total)
+
+
+@router.get("/latest/patch-plan", response_model=PatchPlanResponse)
+def latest_target_patch_plan(db: Session = Depends(get_db)):
+    version = _latest_target_version(db)
+    if version is None:
+        raise HTTPException(status_code=404, detail="No target document")
+    plan = db.scalar(
+        select(PatchPlan)
+        .where(PatchPlan.document_version_id == version.id)
+        .order_by(PatchPlan.created_at.desc())
+        .limit(1)
+    )
+    if plan is None:
+        raise HTTPException(status_code=404, detail="No patch plan for latest target")
+    return PatchPlanResponse(
+        id=plan.id,
+        document_version_id=plan.document_version_id,
+        template_document_version_id=plan.template_document_version_id,
+        round_number=plan.round_number,
+        status=plan.status,
+        source=plan.source,
+        summary=plan.summary,
+    )
+
+
+@router.get("/latest/patch-plan/operations", response_model=PageResponse)
+def latest_target_patch_operations(
+    operation_type: str | None = None,
+    risk_level: str | None = None,
+    limit: int = Query(default=50, le=200, ge=1),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
+    version = _latest_target_version(db)
+    if version is None:
+        raise HTTPException(status_code=404, detail="No target document")
+    plan = db.scalar(
+        select(PatchPlan)
+        .where(PatchPlan.document_version_id == version.id)
+        .order_by(PatchPlan.created_at.desc())
+        .limit(1)
+    )
+    if plan is None:
+        raise HTTPException(status_code=404, detail="No patch plan for latest target")
+
+    base = select(PatchOperation).where(PatchOperation.patch_plan_id == plan.id)
+    if operation_type:
+        base = base.where(PatchOperation.operation_type == operation_type)
+    if risk_level:
+        base = base.where(PatchOperation.risk_level == risk_level)
+
+    total = db.scalar(select(func.count()).select_from(base.subquery())) or 0
+    operations = db.scalars(
+        base.order_by(PatchOperation.created_at, PatchOperation.id).limit(limit).offset(offset)
+    ).all()
+    items = [
+        PatchOperationResponse(
+            id=operation.id,
+            patch_plan_id=operation.patch_plan_id,
+            target_element_id=operation.target_element_id,
+            mapping_result_id=operation.mapping_result_id,
+            profile_rule_id=operation.profile_rule_id,
+            operation_type=operation.operation_type,
+            part_name=operation.part_name,
+            xml_path=operation.xml_path,
+            selector=operation.selector,
+            payload=operation.payload,
+            risk_level=operation.risk_level,
+            status=operation.status,
+            rationale=operation.rationale,
+        )
+        for operation in operations
     ]
     return PageResponse(items=items, limit=limit, offset=offset, total=total)
 

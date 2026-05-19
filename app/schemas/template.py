@@ -103,6 +103,32 @@ class MappingCandidateResponse(BaseModel):
     rationale: dict
 
 
+class PatchPlanResponse(BaseModel):
+    id: str
+    document_version_id: str
+    template_document_version_id: str
+    round_number: int
+    status: str
+    source: str
+    summary: dict
+
+
+class PatchOperationResponse(BaseModel):
+    id: str
+    patch_plan_id: str
+    target_element_id: str
+    mapping_result_id: str | None
+    profile_rule_id: str | None
+    operation_type: str
+    part_name: str
+    xml_path: str | None
+    selector: dict
+    payload: dict
+    risk_level: str
+    status: str
+    rationale: dict
+
+
 class PageResponse(BaseModel):
     items: list
     limit: int

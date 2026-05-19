@@ -35,6 +35,8 @@ curl http://localhost:8000/targets/latest/status
 curl http://localhost:8000/targets/latest/elements
 curl http://localhost:8000/targets/latest/mappings
 curl http://localhost:8000/targets/latest/mappings/{mapping_id}/candidates
+curl http://localhost:8000/targets/latest/patch-plan
+curl http://localhost:8000/targets/latest/patch-plan/operations
 ```
 
 ## Scope
@@ -54,10 +56,12 @@ Implemented in this MVP:
   persisted `mapping_candidates`.
 - Optional Gemini structured-output rerank for top mapping candidates, with deterministic
   fallback when disabled or unavailable.
+- Draft-only deterministic patch plans and patch operations generated from mapping results.
 
 Reserved for later phases:
 
 - Gemini profile generation and visual review calls.
+- OOXML patch execution.
 - OOXML patch engine.
 - Word/Graph and LibreOffice rendering.
 - Multi-agent review and auto-repair.

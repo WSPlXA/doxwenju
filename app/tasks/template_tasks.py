@@ -5,6 +5,7 @@ from app.db.session import SessionLocal
 from app.models.document import Document, DocumentVersion
 from app.services.embeddings import embed_format_atoms, embed_target_elements
 from app.services.ingestion import ingest_template_version
+from app.services.patch_planner import rebuild_patch_plan
 from app.services.target_mapping import rebuild_mapping_results
 from app.tasks.celery_app import celery_app
 
@@ -60,14 +61,18 @@ def target_ingestion(document_version_id: str) -> dict:
             .limit(1)
         )
         mapping_count = 0
+        patch_plan_id = None
         if template_version is not None:
             mapping_count = len(
                 rebuild_mapping_results(db, document_version_id, template_version.id)
             )
+            patch_plan = rebuild_patch_plan(db, document_version_id, template_version.id)
+            patch_plan_id = patch_plan.id
         return {
             "document_version_id": document_version_id,
             "status": "done",
             "mapping_count": mapping_count,
+            "patch_plan_id": patch_plan_id,
         }
     finally:
         db.close()

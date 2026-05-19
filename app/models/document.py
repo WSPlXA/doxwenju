@@ -228,3 +228,42 @@ class MappingCandidate(Base, TimestampMixin):
     score: Mapped[int] = mapped_column(Integer, nullable=False)
     strategy: Mapped[str] = mapped_column(String(64), nullable=False)
     rationale: Mapped[dict] = mapped_column(JsonType, nullable=False)
+
+
+class PatchPlan(Base, TimestampMixin):
+    __tablename__ = "patch_plans"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    document_version_id: Mapped[str] = mapped_column(
+        ForeignKey("document_versions.id"), nullable=False, index=True
+    )
+    template_document_version_id: Mapped[str] = mapped_column(
+        ForeignKey("document_versions.id"), nullable=False, index=True
+    )
+    round_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="draft", index=True)
+    source: Mapped[str] = mapped_column(String(64), nullable=False, default="deterministic_v0")
+    summary: Mapped[dict] = mapped_column(JsonType, nullable=False)
+
+    operations: Mapped[list["PatchOperation"]] = relationship(cascade="all, delete-orphan")
+
+
+class PatchOperation(Base, TimestampMixin):
+    __tablename__ = "patch_operations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    patch_plan_id: Mapped[str] = mapped_column(ForeignKey("patch_plans.id"), nullable=False)
+    document_version_id: Mapped[str] = mapped_column(
+        ForeignKey("document_versions.id"), nullable=False, index=True
+    )
+    target_element_id: Mapped[str] = mapped_column(ForeignKey("target_elements.id"), nullable=False)
+    mapping_result_id: Mapped[str | None] = mapped_column(ForeignKey("mapping_results.id"))
+    profile_rule_id: Mapped[str | None] = mapped_column(ForeignKey("profile_rules.id"))
+    operation_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    part_name: Mapped[str] = mapped_column(String(512), nullable=False, index=True)
+    xml_path: Mapped[str | None] = mapped_column(String(1024))
+    selector: Mapped[dict] = mapped_column(JsonType, nullable=False)
+    payload: Mapped[dict] = mapped_column(JsonType, nullable=False)
+    risk_level: Mapped[str] = mapped_column(String(16), nullable=False, default="P2", index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="planned", index=True)
+    rationale: Mapped[dict] = mapped_column(JsonType, nullable=False)
