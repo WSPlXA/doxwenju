@@ -3,6 +3,7 @@ import math
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.models.document import (
     FormatAtom,
     MappingCandidate,
@@ -10,6 +11,7 @@ from app.models.document import (
     ProfileRule,
     TargetElement,
 )
+from app.services.rerank import maybe_rerank_candidates
 
 
 def rebuild_target_elements(db: Session, document_version_id: str) -> list[TargetElement]:
@@ -97,6 +99,7 @@ def rebuild_mapping_results(
     db.flush()
 
     results = []
+    rerank_attempted = 0
     for element in elements:
         candidates = _candidate_rules_for_element(
             db=db,
@@ -104,22 +107,37 @@ def rebuild_mapping_results(
             rules=rules,
             template_document_version_id=template_document_version_id,
         )
-        rule = candidates[0]["rule"] if candidates else None
-        score = candidates[0]["score"] if candidates else 0
+        selected_candidate = candidates[0] if candidates else None
+        rerank_info = None
+        if candidates and rerank_attempted < settings.gemini_rerank_max_elements_per_run:
+            selected_candidate, rerank_info = maybe_rerank_candidates(
+                db=db,
+                document_version_id=target_document_version_id,
+                target=element,
+                candidates=candidates,
+            )
+            rerank_attempted += 1
+        rule = selected_candidate["rule"] if selected_candidate else None
+        score = selected_candidate["score"] if selected_candidate else 0
         rationale = (
             {
-                "strategy": "hybrid_v0",
-                "winner": _candidate_rationale(candidates[0]),
+                "strategy": "gemini_rerank_v0"
+                if rerank_info and "error" not in rerank_info
+                else "hybrid_v0",
+                "winner": _candidate_rationale(selected_candidate),
                 "candidateCount": len(candidates),
+                "rerank": rerank_info,
             }
-            if candidates
+            if selected_candidate
             else {"strategy": "hybrid_v0", "reasons": ["no template rules available"]}
         )
         result = MappingResult(
             target_element_id=element.id,
             profile_rule_id=rule.id if rule else None,
             score=score,
-            strategy="hybrid_v0",
+            strategy="gemini_rerank_v0"
+            if rerank_info and "error" not in rerank_info
+            else "hybrid_v0",
             rationale=rationale,
         )
         db.add(result)

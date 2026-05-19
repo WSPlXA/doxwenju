@@ -52,10 +52,12 @@ Implemented in this MVP:
 - Optional Gemini embeddings for `format_atoms` when `GEMINI_API_KEY` is configured.
 - Hybrid mapping v0 with structural scoring, keyword boosts, vector atom recall, and
   persisted `mapping_candidates`.
+- Optional Gemini structured-output rerank for top mapping candidates, with deterministic
+  fallback when disabled or unavailable.
 
 Reserved for later phases:
 
-- Gemini profile/rerank/review calls.
+- Gemini profile generation and visual review calls.
 - OOXML patch engine.
 - Word/Graph and LibreOffice rendering.
 - Multi-agent review and auto-repair.

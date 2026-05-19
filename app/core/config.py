@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     gemini_embedding_dimensions: int = 1536
     gemini_embedding_timeout_seconds: int = 30
     gemini_embedding_max_atoms_per_document: int = 200
+    gemini_rerank_enabled: bool = True
+    gemini_rerank_model: str = "gemini-2.5-flash"
+    gemini_rerank_timeout_seconds: int = 45
+    gemini_rerank_max_elements_per_run: int = 50
     moonshot_api_key: str | None = None
     microsoft_graph_tenant_id: str | None = None
     microsoft_graph_client_id: str | None = None

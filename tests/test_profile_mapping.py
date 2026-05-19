@@ -3,6 +3,7 @@ import hashlib
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from app.core.config import settings
 from app.db.base import Base
 from app.models.document import (
     Document,
@@ -93,4 +94,43 @@ def test_target_ingestion_builds_elements_and_mapping_results():
         assert stored_candidates
         assert max(mapping.score for mapping in mappings) > 0
     finally:
+        db.close()
+
+
+def test_mapping_uses_rerank_when_available(monkeypatch):
+    db = _sqlite_session()
+    original_key = settings.gemini_api_key
+    original_enabled = settings.gemini_rerank_enabled
+    original_limit = settings.gemini_rerank_max_elements_per_run
+    try:
+        raw = build_minimal_docx()
+        template = _version(db, "template", raw)
+        target = _version(db, "target", raw)
+        ingest_template_version(db, template)
+        ingest_template_version(db, target)
+
+        settings.gemini_api_key = "test-key"
+        settings.gemini_rerank_enabled = True
+        settings.gemini_rerank_max_elements_per_run = 1
+
+        def fake_rerank(db, document_version_id, target, candidates):
+            return candidates[-1], {
+                "provider": "gemini",
+                "model": "fake",
+                "selectedProfileRuleId": candidates[-1]["rule"].id,
+                "confidence": 88,
+                "rationale": "mocked choice",
+                "riskFlags": [],
+            }
+
+        monkeypatch.setattr("app.services.target_mapping.maybe_rerank_candidates", fake_rerank)
+        mappings = rebuild_mapping_results(db, target.id, template.id)
+
+        assert mappings[0].strategy == "gemini_rerank_v0"
+        assert mappings[0].rationale["rerank"]["confidence"] == 88
+        assert any(mapping.strategy == "hybrid_v0" for mapping in mappings[1:])
+    finally:
+        settings.gemini_api_key = original_key
+        settings.gemini_rerank_enabled = original_enabled
+        settings.gemini_rerank_max_elements_per_run = original_limit
         db.close()
