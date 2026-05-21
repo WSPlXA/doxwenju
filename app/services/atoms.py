@@ -154,10 +154,16 @@ def _paragraph_atoms(
     p_pr = paragraph.find("w:pPr", NS)
     effective = effective_paragraph_format(p_pr, styles_info, numbering_info)
     style_id = effective.get("paragraphStyle")
+    # Look up the human-readable style name (e.g. "Heading 1", "一级标题") so that
+    # classify_paragraph can detect heading styles that use non-standard IDs.
+    style_name: str | None = (
+        styles_info.get("styles", {}).get(style_id, {}).get("name") if style_id else None
+    )
     numbering = effective.get("numbering") if isinstance(effective.get("numbering"), dict) else {}
     numbering_id = numbering.get("numId") if isinstance(numbering, dict) else None
+    outline_lvl = effective.get("outlineLvl")
     text = text_content(paragraph)
-    category = classify_paragraph(style_id, text, numbering_id)
+    category = classify_paragraph(style_id, text, numbering_id, style_name, outline_lvl)
     atom_type = (
         "heading" if category == "heading" else "list" if category == "list" else "paragraph"
     )

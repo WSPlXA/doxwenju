@@ -1,4 +1,5 @@
 import math
+import re
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
@@ -11,7 +12,10 @@ from app.models.document import (
     ProfileRule,
     TargetElement,
 )
-from app.services.rerank import maybe_rerank_candidates
+from app.services.rerank import maybe_rerank_candidates, rerank_candidates_parallel
+
+# Numbered heading depth: matches "1 X", "1.2 X", "1.2.3 X" etc.
+_NUMBERED_PREFIX_RE = re.compile(r"^(\d+(?:\.\d+)*)\s+\S")
 
 
 def rebuild_target_elements(db: Session, document_version_id: str) -> list[TargetElement]:
@@ -98,25 +102,53 @@ def rebuild_mapping_results(
         db.execute(delete(MappingResult).where(MappingResult.target_element_id.in_(element_ids)))
     db.flush()
 
-    results = []
-    rerank_attempted = 0
-    for element in elements:
-        candidates = _candidate_rules_for_element(
-            db=db,
-            element=element,
-            rules=rules,
-            template_document_version_id=template_document_version_id,
-        )
-        selected_candidate = candidates[0] if candidates else None
-        rerank_info = None
-        if candidates and rerank_attempted < settings.gemini_rerank_max_elements_per_run:
-            selected_candidate, rerank_info = maybe_rerank_candidates(
+    # --- Phase 1: compute structural/vector candidates (fast, no API calls) ---
+    elements_with_candidates = [
+        (
+            element,
+            _candidate_rules_for_element(
                 db=db,
-                document_version_id=target_document_version_id,
-                target=element,
-                candidates=candidates,
-            )
-            rerank_attempted += 1
+                element=element,
+                rules=rules,
+                template_document_version_id=template_document_version_id,
+            ),
+        )
+        for element in elements
+    ]
+
+    # --- Phase 2: parallel Gemini rerank for top candidates ---
+    max_rerank = settings.gemini_rerank_max_elements_per_run
+    rerank_pairs = elements_with_candidates[:max_rerank]
+    non_rerank_pairs = elements_with_candidates[max_rerank:]
+
+    rerank_decisions = rerank_candidates_parallel(
+        db=db,
+        document_version_id=target_document_version_id,
+        elements_with_candidates=rerank_pairs,
+    )
+    # Elements beyond the rerank limit fall back to top hybrid candidate
+    fallback_decisions = [
+        (candidates[0] if candidates else None, None)
+        for _, candidates in non_rerank_pairs
+    ]
+    all_decisions = rerank_decisions + fallback_decisions
+
+    # --- Phase 2.5: normalize heading depth consistency ---
+    # Within headings that share the same numbered-text depth ("1 X" = depth 1, "1.2 X" = depth 2 …),
+    # apply the majority-voted rule so that inconsistent Gemini choices are corrected.
+    # E.g. if 4 out of 5 depth-2 headings chose Heading (17) but one chose Heading (16), the
+    # outlier is corrected to Heading (17).
+    all_decisions = _normalize_heading_decisions(
+        elements=[e for e, _ in elements_with_candidates],
+        decisions=all_decisions,
+        candidates_per_element=[c for _, c in elements_with_candidates],
+    )
+
+    # --- Phase 3: write MappingResult + MappingCandidate rows ---
+    results = []
+    for (element, candidates), (selected_candidate, rerank_info) in zip(
+        elements_with_candidates, all_decisions, strict=True
+    ):
         rule = selected_candidate["rule"] if selected_candidate else None
         score = selected_candidate["score"] if selected_candidate else 0
         rationale = (
@@ -159,6 +191,67 @@ def rebuild_mapping_results(
     return results
 
 
+def _normalize_heading_decisions(
+    elements: list[TargetElement],
+    decisions: list[tuple[dict | None, dict | None]],
+    candidates_per_element: list[list[dict]],
+) -> list[tuple[dict | None, dict | None]]:
+    """Normalize Gemini heading choices so all headings at the same numbered depth
+    get the same profile rule (majority vote across the depth group).
+
+    Only applies when there are >= 2 headings at that depth AND a clear majority
+    (strictly more than half) agree on a single rule.
+    """
+    from collections import Counter
+
+    # Collect indices of heading elements with numbered text depth
+    depth_groups: dict[int, list[int]] = {}  # depth → list of indices into decisions
+    for idx, element in enumerate(elements):
+        if element.element_category != "heading":
+            continue
+        depth = _numbered_heading_depth(element.text_summary)
+        if depth is None:
+            continue
+        depth_groups.setdefault(depth, []).append(idx)
+
+    # For each depth group, find majority rule and fix outliers
+    decisions = list(decisions)  # make mutable copy
+    for depth, indices in depth_groups.items():
+        if len(indices) < 2:
+            continue
+        # Count rule IDs chosen by Gemini for this depth
+        rule_id_counter: Counter[str] = Counter()
+        for idx in indices:
+            sel, _ = decisions[idx]
+            if sel:
+                rule_id_counter[sel["rule"].id] += 1
+        if not rule_id_counter:
+            continue
+        majority_rule_id, majority_count = rule_id_counter.most_common(1)[0]
+        if majority_count <= len(indices) // 2:
+            continue  # no clear majority
+        # Apply majority rule to all outliers in this depth group
+        for idx in indices:
+            sel, rerank_info = decisions[idx]
+            if sel and sel["rule"].id == majority_rule_id:
+                continue
+            # Find the majority rule candidate in this element's candidate list
+            majority_candidate = next(
+                (c for c in candidates_per_element[idx] if c["rule"].id == majority_rule_id),
+                None,
+            )
+            if majority_candidate is None:
+                continue  # majority rule wasn't even a candidate — skip
+            # Replace the decision, tag rationale with normalization info
+            patched_rerank = {
+                **(rerank_info or {}),
+                "normalizedFromDepth": depth,
+                "overriddenRuleId": sel["rule"].id if sel else None,
+            }
+            decisions[idx] = (majority_candidate, patched_rerank)
+    return decisions
+
+
 def _candidate_rules_for_element(
     db: Session,
     element: TargetElement,
@@ -166,9 +259,10 @@ def _candidate_rules_for_element(
     template_document_version_id: str,
 ) -> list[dict]:
     vector_scores = _vector_atom_scores(db, element, template_document_version_id)
+    heading_rules = [r for r in rules if r.element_category == "heading"] if element.element_category == "heading" else []
     candidates: list[dict] = []
     for rule in rules:
-        structural_score, structural_reasons = _score_rule(element, rule)
+        structural_score, structural_reasons = _score_rule(element, rule, heading_rules)
         vector_score, vector_reasons = _vector_boost(rule, vector_scores)
         keyword_score, keyword_reasons = _keyword_boost(element, rule)
         score = structural_score + vector_score + keyword_score
@@ -187,7 +281,61 @@ def _candidate_rules_for_element(
     return sorted(candidates, key=lambda item: (-item["score"], item["rule"].priority))[:10]
 
 
-def _score_rule(element: TargetElement, rule: ProfileRule) -> tuple[int, list[str]]:
+def _numbered_heading_depth(text: str | None) -> int | None:
+    """Return the depth of a numbered section heading (1-based), or None.
+
+    Examples:
+        "3 标题"      → 1  (chapter level)
+        "3.2 总结"    → 2  (section level)
+        "3.2.1 X"     → 3  (subsection level)
+    """
+    if not text:
+        return None
+    m = _NUMBERED_PREFIX_RE.match(text.strip())
+    if not m:
+        return None
+    return len(m.group(1).split("."))
+
+
+def _heading_depth_rank(rule: ProfileRule, all_heading_rules: list[ProfileRule]) -> int | None:
+    """Estimate the heading depth rank of *rule* among all heading rules.
+
+    Ranks by effective run font size (larger font = shallower/higher level = rank 1).
+    Returns 1-based rank, or None if the rule has no font-size info.
+    """
+    def _rule_sz(r: ProfileRule) -> float | None:
+        props = r.properties or {}
+        run_eff = props.get("runEffective") or {}
+        sz = run_eff.get("sz")
+        if sz is not None:
+            try:
+                return float(sz)
+            except (TypeError, ValueError):
+                pass
+        return None
+
+    rule_sz = _rule_sz(rule)
+    if rule_sz is None:
+        return None
+
+    # Collect all unique sizes among heading rules, sorted descending
+    sizes = sorted(
+        {s for r in all_heading_rules if (s := _rule_sz(r)) is not None},
+        reverse=True,
+    )
+    if not sizes:
+        return None
+    try:
+        return sizes.index(rule_sz) + 1  # 1-based rank
+    except ValueError:
+        return None
+
+
+def _score_rule(
+    element: TargetElement,
+    rule: ProfileRule,
+    heading_rules: list[ProfileRule] | None = None,
+) -> tuple[int, list[str]]:
     score = 0
     reasons: list[str] = []
     selector = rule.selector or {}
@@ -212,6 +360,24 @@ def _score_rule(element: TargetElement, rule: ProfileRule) -> tuple[int, list[st
     if selector.get("atomType") == element.element_type:
         score += 10
         reasons.append("atom_type_match")
+
+    # Heading depth penalty: numbered section text patterns ("1 X" depth=1, "1.2 X" depth=2, …)
+    # We penalise rules whose rank is MORE THAN ONE step away from the element's numbered depth.
+    # This prevents Gemini from confusing e.g. "3 标题" (chapter, depth=1) with a level-3
+    # heading (rank=3) — but we do NOT give bonuses because the depth→rank offset varies by
+    # template (e.g. rank-1 may be a thesis-title style, not a numbered chapter heading).
+    if (
+        element.element_category == "heading"
+        and rule.element_category == "heading"
+        and heading_rules
+    ):
+        element_depth = _numbered_heading_depth(element.text_summary)
+        rule_rank = _heading_depth_rank(rule, heading_rules)
+        if element_depth is not None and rule_rank is not None:
+            gap = abs(element_depth - rule_rank)
+            if gap >= 2:
+                score -= 25  # large depth mismatch, penalise strongly
+                reasons.append("heading_depth_mismatch")
 
     score += max(0, 10 - rule.priority // 10)
     return score, reasons or ["fallback_priority"]

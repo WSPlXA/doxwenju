@@ -1,6 +1,7 @@
 import hashlib
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any
 
@@ -9,6 +10,9 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.document import ProviderCall, TargetElement
+
+# Max concurrent Gemini rerank threads — keeps us within free-tier rate limits
+_RERANK_CONCURRENCY = 6
 
 GEMINI_GENERATE_ENDPOINT = (
     "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
@@ -141,6 +145,104 @@ def maybe_rerank_candidates(
             )
         )
         return candidates[0] if candidates else None, {"error": str(exc), "fallback": "hybrid_top1"}
+
+
+def rerank_candidates_parallel(
+    db: Session,
+    document_version_id: str,
+    elements_with_candidates: list[tuple["TargetElement", list[dict]]],
+) -> list[tuple[dict | None, dict | None]]:
+    """Rerank multiple elements concurrently.
+
+    Runs all Gemini HTTP calls in a thread pool (I/O bound, no DB access
+    inside threads), then writes ProviderCall records back in the main
+    thread after all calls complete.
+
+    Returns a list of (selected_candidate, rerank_info) in the same
+    order as *elements_with_candidates*.
+    """
+    if not (settings.gemini_api_key and settings.gemini_rerank_enabled):
+        return [
+            (candidates[0] if candidates else None, None)
+            for _, candidates in elements_with_candidates
+        ]
+
+    provider = GeminiRerankProvider(
+        api_key=settings.gemini_api_key or "",
+        model=settings.gemini_rerank_model,
+    )
+
+    # --- Phase 1: parallel HTTP calls (no DB) ---
+    def _call(idx: int, target: "TargetElement", candidates: list[dict]):
+        if not candidates:
+            return idx, None, None, None
+        prompt = _build_prompt(target, candidates)
+        prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
+        started = time.perf_counter()
+        try:
+            decision = provider.rerank(target, candidates)
+            selected = next(
+                c for c in candidates if c["rule"].id == decision.selected_profile_rule_id
+            )
+            duration_ms = int((time.perf_counter() - started) * 1000)
+            rerank_info = {
+                "provider": provider.provider,
+                "model": provider.model,
+                "selectedProfileRuleId": decision.selected_profile_rule_id,
+                "confidence": decision.confidence,
+                "rationale": decision.rationale,
+                "riskFlags": decision.risk_flags,
+            }
+            output_hash = hashlib.sha256(
+                json.dumps(decision.raw, sort_keys=True).encode()
+            ).hexdigest()
+            return idx, selected, rerank_info, {
+                "prompt_hash": prompt_hash,
+                "output_hash": output_hash,
+                "duration_ms": duration_ms,
+                "error_message": None,
+            }
+        except Exception as exc:
+            duration_ms = int((time.perf_counter() - started) * 1000)
+            fallback = candidates[0] if candidates else None
+            return idx, fallback, {"error": str(exc), "fallback": "hybrid_top1"}, {
+                "prompt_hash": prompt_hash,
+                "output_hash": None,
+                "duration_ms": duration_ms,
+                "error_message": str(exc),
+            }
+
+    results: list[tuple[dict | None, dict | None]] = [(None, None)] * len(elements_with_candidates)
+    call_records: list[dict] = []
+
+    with ThreadPoolExecutor(max_workers=_RERANK_CONCURRENCY) as pool:
+        futures = {
+            pool.submit(_call, idx, target, candidates): idx
+            for idx, (target, candidates) in enumerate(elements_with_candidates)
+            if candidates
+        }
+        for future in as_completed(futures):
+            idx, selected, rerank_info, call_meta = future.result()
+            results[idx] = (selected, rerank_info)
+            if call_meta is not None:
+                call_records.append({"idx": idx, **call_meta})
+
+    # --- Phase 2: write ProviderCall records in main thread ---
+    for rec in call_records:
+        db.add(
+            ProviderCall(
+                document_version_id=document_version_id,
+                provider=provider.provider,
+                model=provider.model,
+                purpose=provider.purpose,
+                prompt_hash=rec["prompt_hash"],
+                output_hash=rec.get("output_hash"),
+                duration_ms=rec["duration_ms"],
+                error_message=rec.get("error_message"),
+            )
+        )
+
+    return results
 
 
 def _rerank_available(candidates: list[dict]) -> bool:
