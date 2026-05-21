@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>文档格式校正工具</title>
+<style>
+:root {
+  --blue:   #2563eb; --blue-bg:  #dbeafe;
+  --green:  #16a34a; --green-bg: #dcfce7;
+  --amber:  #d97706; --amber-bg: #fef3c7;
+  --red:    #dc2626; --red-bg:   #fee2e2;
+  --gray-0: #f9fafb; --gray-1: #f3f4f6; --gray-2: #e5e7eb;
+  --gray-5: #6b7280; --gray-7: #374151; --gray-9: #111827;
+  --r: 8px; --sh: 0 1px 3px rgba(0,0,0,.1),0 1px 2px rgba(0,0,0,.06);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;
+  background:var(--gray-0);color:var(--gray-9);min-height:100vh}
+
+/* ── Header ── */
+header{background:#fff;border-bottom:1px solid var(--gray-2);padding:0 24px;
+  height:56px;display:flex;align-items:center;gap:10px}
+header svg{flex-shrink:0}
+header h1{font-size:17px;font-weight:600}
+header p{color:var(--gray-5);font-size:13px;margin-left:4px}
+
+/* ── Layout ── */
+.main{max-width:1080px;margin:0 auto;padding:28px 20px;display:flex;flex-direction:column;gap:20px}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+@media(max-width:680px){.row{grid-template-columns:1fr}}
+
+/* ── Card ── */
+.card{background:#fff;border-radius:var(--r);box-shadow:var(--sh);overflow:hidden}
+.card-head{padding:14px 18px;border-bottom:1px solid var(--gray-1);
+  display:flex;align-items:center;gap:8px}
+.step{width:22px;height:22px;border-radius:50%;background:var(--blue);color:#fff;
+  font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.step.ok{background:var(--green)}
+.card-head h2{font-size:14px;font-weight:600;flex:1}
+.card-body{padding:18px}
+
+/* ── Upload zone ── */
+.drop{border:2px dashed var(--gray-2);border-radius:var(--r);padding:28px 16px;
+  text-align:center;cursor:pointer;transition:border-color .15s,background .15s;position:relative}
+.drop input{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%}
+.drop:hover,.drop.over{border-color:var(--blue);background:var(--blue-bg)}
+.drop-icon{font-size:28px;margin-bottom:6px}
+.drop-label{font-size:13px;color:var(--gray-7)}
+.drop-hint{font-size:11px;color:var(--gray-5);margin-top:3px}
+
+/* ── Badge ── */
+.badge{display:inline-flex;align-items:center;gap:4px;padding:2px 9px;
+  border-radius:9999px;font-size:11px;font-weight:500;white-space:nowrap}
+.badge::before{content:'';width:5px;height:5px;border-radius:50%;background:currentColor}
+.badge.queued{background:var(--gray-1);color:var(--gray-7)}
+.badge.busy{background:var(--amber-bg);color:var(--amber)}
+.badge.done{background:var(--green-bg);color:var(--green)}
+.badge.failed{background:var(--red-bg);color:var(--red)}
+.badge.warn{background:var(--amber-bg);color:var(--amber)}
+
+/* ── Status panel ── */
+.panel{margin-top:12px;padding:10px 13px;border-radius:var(--r);
+  background:var(--gray-0);border:1px solid var(--gray-2);font-size:12px;display:none}
+.panel.show{display:block}
+.kv{display:flex;justify-content:space-between;align-items:center;margin-bottom:5px}
+.kv:last-child{margin-bottom:0}
+.kv-label{color:var(--gray-5)}
+.bar{height:3px;border-radius:2px;background:var(--gray-2);margin-top:7px;overflow:hidden}
+.fill{height:100%;background:var(--blue);border-radius:2px;transition:width .3s}
+
+/* ── Divider ── */
+hr{border:none;border-top:1px solid var(--gray-2);margin:14px 0;display:none}
+hr.show{display:block}
+
+/* ── Agent controls ── */
+.agent-wrap{display:none}
+.agent-wrap.show{display:block}
+.rounds-row{display:flex;align-items:center;gap:8px;margin-bottom:12px}
+.rounds-row label{font-size:12px;color:var(--gray-7)}
+select{padding:4px 8px;border-radius:var(--r);border:1px solid var(--gray-2);
+  font-size:12px;background:#fff;color:var(--gray-7)}
+
+/* ── Buttons ── */
+.btns{display:flex;gap:8px;flex-wrap:wrap}
+.btn{display:inline-flex;align-items:center;gap:5px;padding:7px 14px;border-radius:var(--r);
+  font-size:13px;font-weight:500;border:none;cursor:pointer;transition:opacity .15s;
+  text-decoration:none}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.btn-primary{background:var(--blue);color:#fff}
+.btn-primary:hover:not(:disabled){opacity:.88}
+.btn-outline{background:#fff;color:var(--gray-7);border:1px solid var(--gray-2)}
+.btn-outline:hover:not(:disabled){background:var(--gray-0)}
+.btn-success{background:var(--green);color:#fff}
+.btn-success:hover:not(:disabled){opacity:.88}
+
+/* ── Step list ── */
+.steps{display:flex;flex-direction:column;gap:5px;margin-top:12px}
+.si{display:flex;align-items:flex-start;gap:8px;padding:7px 10px;border-radius:var(--r);
+  background:var(--gray-0);border:1px solid var(--gray-2);font-size:12px}
+.si.running{border-color:var(--blue);background:var(--blue-bg)}
+.si.done{border-color:#bbf7d0;background:var(--green-bg)}
+.si.failed{border-color:#fecaca;background:var(--red-bg)}
+.si-icon{font-size:13px;flex-shrink:0;margin-top:1px;min-width:16px;text-align:center}
+.si-name{font-weight:500}
+.si-detail{color:var(--gray-5);margin-top:1px}
+.si-err{color:var(--red);margin-top:1px}
+
+/* ── Result card ── */
+#result-card{display:none}
+#result-card.show{display:block}
+.result-summary{padding:10px 13px;border-radius:var(--r);background:var(--green-bg);
+  border:1px solid #bbf7d0;font-size:12px;margin-bottom:12px;line-height:1.6}
+.result-summary.warn{background:var(--amber-bg);border-color:#fcd34d}
+
+/* ── Error toast ── */
+.err{margin-top:8px;padding:8px 12px;border-radius:var(--r);background:var(--red-bg);
+  border:1px solid #fecaca;font-size:12px;color:var(--red);display:none}
+.err.show{display:block}
+
+/* ── Spinner ── */
+@keyframes spin{to{transform:rotate(360deg)}}
+.spin{display:inline-block;animation:spin .7s linear infinite}
+</style>
+</head>
+<body>
+
+<header>
+  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#2563eb" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/>
+  </svg>
+  <h1>文档格式校正</h1>
+  <p>上传格式模板与目标文档，自动对齐排版</p>
+</header>
+
+<main class="main">
+  <div class="row">
+
+    <!-- ── 模板卡片 ── -->
+    <div class="card">
+      <div class="card-head">
+        <div class="step" id="tpl-num">1</div>
+        <h2>格式模板</h2>
+        <div id="tpl-badge"></div>
+      </div>
+      <div class="card-body">
+        <label class="drop" id="tpl-drop">
+          <input type="file" id="tpl-file" accept=".docx">
+          <div class="drop-icon">📂</div>
+          <div class="drop-label">点击或拖拽上传模板 .docx</div>
+          <div class="drop-hint">最大 50 MB · 上传后将替换当前模板</div>
+        </label>
+        <div class="err" id="tpl-err"></div>
+        <div class="panel" id="tpl-panel">
+          <div class="kv"><span class="kv-label">进度</span><span id="tpl-prog-txt">—</span></div>
+          <div class="bar"><div class="fill" id="tpl-prog-bar" style="width:0%"></div></div>
+          <div class="kv" style="margin-top:8px"><span class="kv-label">格式规则</span><span id="tpl-rules">—</span></div>
+          <div class="kv"><span class="kv-label">格式原子</span><span id="tpl-atoms">—</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── 目标文档卡片 ── -->
+    <div class="card">
+      <div class="card-head">
+        <div class="step" id="tgt-num">2</div>
+        <h2>目标文档</h2>
+        <div id="tgt-badge"></div>
+      </div>
+      <div class="card-body">
+        <label class="drop" id="tgt-drop">
+          <input type="file" id="tgt-file" accept=".docx">
+          <div class="drop-icon">📄</div>
+          <div class="drop-label">点击或拖拽上传目标 .docx</div>
+          <div class="drop-hint">最大 50 MB</div>
+        </label>
+        <div class="err" id="tgt-err"></div>
+        <div class="panel" id="tgt-panel">
+          <div class="kv"><span class="kv-label">进度</span><span id="tgt-prog-txt">—</span></div>
+          <div class="bar"><div class="fill" id="tgt-prog-bar" style="width:0%"></div></div>
+          <div class="kv" style="margin-top:8px"><span class="kv-label">文档元素</span><span id="tgt-elems">—</span></div>
+          <div class="kv"><span class="kv-label">映射结果</span><span id="tgt-mappings">—</span></div>
+        </div>
+
+        <hr id="agent-hr">
+        <div class="agent-wrap" id="agent-wrap">
+          <div class="rounds-row">
+            <label>最大修复轮次</label>
+            <select id="rounds">
+              <option value="1">1 轮</option>
+              <option value="2">2 轮</option>
+              <option value="3" selected>3 轮（推荐）</option>
+              <option value="5">5 轮</option>
+            </select>
+          </div>
+          <div class="btns">
+            <button class="btn btn-primary" id="run-btn" disabled>▶ 运行格式校正</button>
+          </div>
+          <div class="steps" id="steps"></div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /.row -->
+
+  <!-- ── 结果卡片 ── -->
+  <div class="card" id="result-card">
+    <div class="card-head">
+      <div class="step ok">✓</div>
+      <h2>校正结果</h2>
+      <div id="result-badge" style="margin-left:auto"></div>
+    </div>
+    <div class="card-body">
+      <div class="result-summary" id="result-summary"></div>
+      <div class="btns">
+        <a id="dl-docx" class="btn btn-primary" href="/targets/latest/output.docx" download style="display:none">⬇ 下载 DOCX</a>
+        <a id="dl-pdf"  class="btn btn-outline"  href="/targets/latest/render.pdf"  download style="display:none">⬇ 下载 PDF</a>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<script>
+/* ─────────────────────────── helpers ─────────────────────────── */
+const $  = id => document.getElementById(id);
+const on = (id, ev, fn) => $(id).addEventListener(ev, fn);
+
+function mkBadge(status) {
+  const MAP = {
+    queued:'排队中', processing:'处理中', ingesting:'解析中',
+    mapping:'映射中', patching:'修补中', postprocessing:'后处理',
+    rendering:'渲染中', repairing:'修复中',
+    done:'完成', failed:'失败', needs_human:'需人工确认', missing:'未上传',
+  };
+  const cls = {done:'done', failed:'failed', needs_human:'warn', missing:'queued'}[status] ?? 'busy';
+  return `<span class="badge ${cls}">${MAP[status] ?? status}</span>`;
+}
+
+function stepIcon(type, status) {
+  if (status === 'done')   return '✓';
+  if (status === 'failed') return '✗';
+  if (status === 'running') return '<span class="spin">⟳</span>';
+  return {ingest:'📥', mapping:'🔗', patch:'🔧', word_postprocess:'📐',
+          render:'🖨', repair_plan:'🛠'}[type] ?? '·';
+}
+
+function stepLabel(type) {
+  return {ingest:'文档解析', mapping:'元素映射', patch:'格式修补',
+          word_postprocess:'布局后处理', render:'渲染预检',
+          repair_plan:'修复计划'}[type] ?? type;
+}
+
+async function api(url, opts = {}) {
+  const r = await fetch(url, opts);
+  if (!r.ok) { const t = await r.text().catch(() => r.statusText); throw new Error(`${r.status}: ${t}`); }
+  return r.json();
+}
+
+function showErr(id, msg) { const e=$(id); e.textContent=msg; e.classList.add('show'); }
+function clearErr(id)     { const e=$(id); e.textContent='';  e.classList.remove('show'); }
+function setBar(pfx, pct, txt) {
+  $(`${pfx}-prog-bar`).style.width = pct + '%';
+  $(`${pfx}-prog-txt`).textContent = txt;
+}
+
+/* ─────────────────────────── state ─────────────────────────── */
+let tplDone = false, tgtDone = false;
+let tplTimer, tgtTimer, agentTimer;
+
+/* ─────────────────── template upload & poll ─────────────────── */
+on('tpl-file', 'change', e => { if (e.target.files[0]) uploadTpl(e.target.files[0]); });
+dragDrop('tpl-drop', 'tpl-file', uploadTpl);
+
+async function uploadTpl(file) {
+  if (!file.name.endsWith('.docx')) return showErr('tpl-err', '请上传 .docx 文件');
+  clearErr('tpl-err');
+  $('tpl-badge').innerHTML = mkBadge('processing');
+  $('tpl-panel').classList.add('show');
+  setBar('tpl', 5, '上传中…');
+  const fd = new FormData(); fd.append('file', file);
+  try {
+    await api('/templates/current', { method:'POST', body:fd });
+    pollTpl();
+  } catch(e) { showErr('tpl-err', e.message); $('tpl-badge').innerHTML = mkBadge('failed'); }
+}
+
+function pollTpl() {
+  clearInterval(tplTimer);
+  tplTimer = setInterval(async () => {
+    try {
+      const s = await api('/templates/current/status');
+      $('tpl-badge').innerHTML = mkBadge(s.status);
+      setBar('tpl', s.progress ?? 0, `${s.progress ?? 0}%`);
+      if (s.status === 'done') {
+        clearInterval(tplTimer); tplDone = true;
+        $('tpl-num').classList.add('ok');
+        loadTplStats(); refreshRunBtn();
+      } else if (s.status === 'failed') {
+        clearInterval(tplTimer);
+        showErr('tpl-err', s.error_message ?? '处理失败');
+      }
+    } catch {}
+  }, 1500);
+}
+
+async function loadTplStats() {
+  try {
+    const [r, a] = await Promise.all([
+      api('/templates/current/rules?limit=1'),
+      api('/templates/current/atoms?limit=1'),
+    ]);
+    $('tpl-rules').textContent = r.total + ' 条';
+    $('tpl-atoms').textContent = a.total + ' 个';
+  } catch {}
+}
+
+/* ─────────────────── target upload & poll ─────────────────── */
+on('tgt-file', 'change', e => { if (e.target.files[0]) uploadTgt(e.target.files[0]); });
+dragDrop('tgt-drop', 'tgt-file', uploadTgt);
+
+async function uploadTgt(file) {
+  if (!file.name.endsWith('.docx')) return showErr('tgt-err', '请上传 .docx 文件');
+  clearErr('tgt-err');
+  tgtDone = false;
+  $('tgt-badge').innerHTML = mkBadge('processing');
+  $('tgt-panel').classList.add('show');
+  setBar('tgt', 5, '上传中…');
+  $('agent-hr').classList.remove('show');
+  $('agent-wrap').classList.remove('show');
+  hideResult();
+  $('steps').innerHTML = '';
+  const fd = new FormData(); fd.append('file', file);
+  try {
+    await api('/targets', { method:'POST', body:fd });
+    pollTgt();
+  } catch(e) { showErr('tgt-err', e.message); $('tgt-badge').innerHTML = mkBadge('failed'); }
+}
+
+function pollTgt() {
+  clearInterval(tgtTimer);
+  tgtTimer = setInterval(async () => {
+    try {
+      const s = await api('/targets/latest/status');
+      $('tgt-badge').innerHTML = mkBadge(s.status);
+      setBar('tgt', s.progress ?? 0, `${s.progress ?? 0}%`);
+      if (s.status === 'done') {
+        clearInterval(tgtTimer); tgtDone = true;
+        $('tgt-num').classList.add('ok');
+        loadTgtStats();
+        $('agent-hr').classList.add('show');
+        $('agent-wrap').classList.add('show');
+        refreshRunBtn();
+      } else if (s.status === 'failed') {
+        clearInterval(tgtTimer);
+        showErr('tgt-err', s.error_message ?? '处理失败');
+      }
+    } catch {}
+  }, 1500);
+}
+
+async function loadTgtStats() {
+  try {
+    const [el, mp] = await Promise.all([
+      api('/targets/latest/elements?limit=1'),
+      api('/targets/latest/mappings?limit=1'),
+    ]);
+    $('tgt-elems').textContent    = el.total + ' 个';
+    $('tgt-mappings').textContent = mp.total + ' 条';
+  } catch {}
+}
+
+/* ─────────────────── agent run ─────────────────── */
+function refreshRunBtn() {
+  $('run-btn').disabled = !(tplDone && tgtDone);
+}
+
+on('run-btn', 'click', async () => {
+  $('run-btn').disabled = true;
+  $('steps').innerHTML = '';
+  hideResult();
+  clearErr('tgt-err');
+  try {
+    await api(`/targets/latest/agent-run?max_rounds=${$('rounds').value}`, { method:'POST' });
+    pollAgent();
+  } catch(e) {
+    showErr('tgt-err', e.message);
+    $('run-btn').disabled = false;
+  }
+});
+
+function pollAgent() {
+  clearInterval(agentTimer);
+  agentTimer = setInterval(async () => {
+    try {
+      const run = await api('/targets/latest/agent-run/status');
+      renderSteps(run.steps ?? []);
+      if (['done','failed','needs_human'].includes(run.status)) {
+        clearInterval(agentTimer);
+        showResult(run);
+        $('run-btn').disabled = false;
+      }
+    } catch {}
+  }, 2000);
+}
+
+function renderSteps(steps) {
+  // keep last record per (round, type) pair
+  const seen = new Map();
+  for (const s of steps) seen.set(`${s.round_number}:${s.step_type}`, s);
+  const list = $('steps');
+  list.innerHTML = '';
+  for (const [, s] of seen) {
+    const detail = fmtDetail(s.summary);
+    const div = document.createElement('div');
+    div.className = `si ${s.status}`;
+    div.innerHTML =
+      `<div class="si-icon">${stepIcon(s.step_type, s.status)}</div>` +
+      `<div><div class="si-name">第&nbsp;${s.round_number}&nbsp;轮 · ${stepLabel(s.step_type)}</div>` +
+      (detail ? `<div class="si-detail">${detail}</div>` : '') +
+      (s.error_message ? `<div class="si-err">${s.error_message}</div>` : '') +
+      `</div>`;
+    list.appendChild(div);
+  }
+}
+
+function fmtDetail(m) {
+  if (!m) return '';
+  if (m.applied    != null) return `已应用 ${m.applied}，跳过 ${m.skipped}`;
+  if (m.mappingCount != null) return `${m.mappingCount} 个映射`;
+  if (m.pageCount  != null) return `${m.pageCount} 页`;
+  if (m.targetElementCount != null) return `${m.targetElementCount} 个元素`;
+  if (m.operationCount != null) return `${m.operationCount} 个操作`;
+  if (m.status === 'done') return '完成';
+  return '';
+}
+
+function showResult(run) {
+  const s = run.summary ?? {};
+  const parts = [];
+  if (s.rounds)            parts.push(`${s.rounds} 轮`);
+  if (s.outputPageCount)   parts.push(`输出 ${s.outputPageCount} 页`);
+  if (s.baselinePageCount) parts.push(`基准 ${s.baselinePageCount} 页`);
+  const reasons = {
+    all_operations_applied : '全部格式操作已应用 ✓',
+    max_rounds_reached     : '已达最大修复轮次',
+    layout_drift_too_large : '布局变化较大，建议人工确认',
+    no_repairable_operations: '无可再修复的操作',
+    loop_exhausted         : '修复循环已耗尽',
+  };
+  if (s.stopReason) parts.push(reasons[s.stopReason] ?? s.stopReason);
+
+  const sumEl = $('result-summary');
+  sumEl.textContent = parts.join('　·　') || '处理完成';
+  sumEl.className = 'result-summary' + (run.status === 'needs_human' ? ' warn' : '');
+
+  $('result-badge').innerHTML = mkBadge(run.status);
+  $('result-card').classList.add('show');
+  $('dl-docx').style.display = 'inline-flex';
+  const hasPdf = (run.steps ?? []).some(st => st.step_type === 'render' && st.status === 'done');
+  if (hasPdf) $('dl-pdf').style.display = 'inline-flex';
+}
+
+function hideResult() {
+  $('result-card').classList.remove('show');
+  $('dl-docx').style.display = 'none';
+  $('dl-pdf').style.display  = 'none';
+}
+
+/* ─────────────────── drag-and-drop ─────────────────── */
+function dragDrop(zoneId, inputId, cb) {
+  const z = $(zoneId);
+  z.addEventListener('dragover',  e => { e.preventDefault(); z.classList.add('over'); });
+  z.addEventListener('dragleave', ()  => z.classList.remove('over'));
+  z.addEventListener('drop', e => {
+    e.preventDefault(); z.classList.remove('over');
+    const f = e.dataTransfer.files[0]; if (f) cb(f);
+  });
+}
+
+/* ─────────────────── init: restore existing state ─────────────────── */
+(async () => {
+  // template
+  try {
+    const s = await api('/templates/current/status');
+    if (s.status && s.status !== 'missing') {
+      $('tpl-badge').innerHTML = mkBadge(s.status);
+      $('tpl-panel').classList.add('show');
+      setBar('tpl', s.progress ?? 0, `${s.progress ?? 0}%`);
+      if (s.status === 'done') {
+        tplDone = true; $('tpl-num').classList.add('ok');
+        await loadTplStats();
+      } else if (!['failed'].includes(s.status)) pollTpl();
+    }
+  } catch {}
+
+  // target
+  try {
+    const s = await api('/targets/latest/status');
+    if (s.status && s.status !== 'missing') {
+      $('tgt-badge').innerHTML = mkBadge(s.status);
+      $('tgt-panel').classList.add('show');
+      setBar('tgt', s.progress ?? 0, `${s.progress ?? 0}%`);
+      if (s.status === 'done') {
+        tgtDone = true; $('tgt-num').classList.add('ok');
+        await loadTgtStats();
+        $('agent-hr').classList.add('show');
+        $('agent-wrap').classList.add('show');
+      } else if (!['failed'].includes(s.status)) pollTgt();
+    }
+  } catch {}
+
+  refreshRunBtn();
+
+  // agent run
+  try {
+    const run = await api('/targets/latest/agent-run/status');
+    if (run?.status) {
+      renderSteps(run.steps ?? []);
+      if (['done','failed','needs_human'].includes(run.status)) showResult(run);
+      else pollAgent();
+    }
+  } catch {}
+})();
+</script>
+</body>
+</html>
