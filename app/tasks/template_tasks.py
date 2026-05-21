@@ -208,13 +208,9 @@ def _run_format_agent(db: Session, run: AgentRun) -> dict:
         )
 
         _update_agent_run(db, run, "mapping")
-        existing_mapping_count = _mapping_count(db, target_version.id)
-        if existing_mapping_count:
-            mapping_count = existing_mapping_count
-        else:
-            mapping_count = len(
-                rebuild_mapping_results(db, target_version.id, template_version.id)
-            )
+        mapping_count = len(
+            rebuild_mapping_results(db, target_version.id, template_version.id)
+        )
         _record_agent_step(
             db,
             run.id,
@@ -223,7 +219,7 @@ def _run_format_agent(db: Session, run: AgentRun) -> dict:
             "done",
             {
                 "mappingCount": mapping_count,
-                "reusedExistingMappings": bool(existing_mapping_count),
+                "reusedExistingMappings": False,
                 "templateDocumentVersionId": template_version.id,
             },
         )
