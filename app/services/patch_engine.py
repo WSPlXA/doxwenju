@@ -25,6 +25,7 @@ ET.register_namespace("a", NS["a"])
 ET.register_namespace("mc", NS["mc"])
 
 SUPPORTED_OPERATIONS = {
+    "apply_document_setup_rule",
     "apply_endnote_rule",
     "apply_footnote_rule",
     "apply_header_footer_rule",
@@ -221,7 +222,7 @@ def _apply_plan_to_docx(db: Session, raw_file: bytes, plan: PatchPlan) -> tuple[
             db.add(operation)
             continue
         applied = _apply_supported_operation(
-            paragraphs, tables, note_roots, header_footer_roots, operation, available_style_ids
+            root, paragraphs, tables, note_roots, header_footer_roots, operation, available_style_ids
         )
         if not applied:
             counts["skipped"] += 1
@@ -248,6 +249,7 @@ def _apply_plan_to_docx(db: Session, raw_file: bytes, plan: PatchPlan) -> tuple[
 
 
 def _apply_supported_operation(
+    root: ET.Element,
     paragraphs: list[ET.Element],
     tables: list[ET.Element],
     note_roots: dict[str, ET.Element],
@@ -255,6 +257,18 @@ def _apply_supported_operation(
     operation: PatchOperation,
     available_style_ids: set[str],
 ) -> bool:
+    if operation.operation_type == "apply_document_setup_rule":
+        sectpr = _sectpr_for_operation(root, operation)
+        if sectpr is None:
+            operation.status = "skipped"
+            operation.rationale = {
+                **(operation.rationale or {}),
+                "skipReason": "sectpr_not_found",
+            }
+            return False
+        _apply_document_setup_properties(sectpr, operation.payload)
+        return True
+
     if operation.operation_type == "apply_table_rule":
         table = _table_for_operation(tables, operation)
         if table is None:
@@ -301,6 +315,48 @@ def _apply_supported_operation(
         return False
     _apply_paragraph_properties(paragraph, operation.payload, available_style_ids)
     return True
+
+
+def _sectpr_for_operation(root: ET.Element, operation: PatchOperation) -> ET.Element | None:
+    if operation.part_name != "word/document.xml":
+        return None
+    xml_path = operation.xml_path or ""
+    match = re.search(r"/w:sectPr\[(\d+)\]$", xml_path)
+    if not match:
+        # Accept a bare sectPr path without an index as the first (and usually only) one
+        if not xml_path.endswith("/w:sectPr"):
+            return None
+        sect_prs = root.findall(".//w:sectPr", NS)
+        return sect_prs[0] if sect_prs else None
+    index = int(match.group(1)) - 1
+    sect_prs = root.findall(".//w:sectPr", NS)
+    return sect_prs[index] if 0 <= index < len(sect_prs) else None
+
+
+_PG_SZ_ATTR_MAP = {"width": "w", "height": "h", "orient": "orient"}
+
+
+def _apply_document_setup_properties(sectpr: ET.Element, payload: dict) -> None:
+    rule_props = payload.get("ruleProperties", {})
+
+    pg_sz_data = rule_props.get("pageSize")
+    if isinstance(pg_sz_data, dict):
+        pg_sz = sectpr.find("w:pgSz", NS)
+        if pg_sz is None:
+            pg_sz = ET.SubElement(sectpr, qn("w", "pgSz"))
+        for key, ooxml_attr in _PG_SZ_ATTR_MAP.items():
+            value = pg_sz_data.get(key)
+            if value is not None:
+                pg_sz.set(qn("w", ooxml_attr), str(value))
+
+    pg_mar_data = rule_props.get("pageMargins")
+    if isinstance(pg_mar_data, dict):
+        pg_mar = sectpr.find("w:pgMar", NS)
+        if pg_mar is None:
+            pg_mar = ET.SubElement(sectpr, qn("w", "pgMar"))
+        for attr_name, value in pg_mar_data.items():
+            if value is not None:
+                pg_mar.set(qn("w", attr_name), str(value))
 
 
 def _paragraph_for_operation(
@@ -428,8 +484,8 @@ def _apply_paragraph_properties(
         _set_attrs_child(p_pr, "ind", effective["indent"])
     if isinstance(effective.get("numbering"), dict):
         _set_numbering(p_pr, effective["numbering"])
-    outline_level = _outline_level_for_rule(payload.get("ruleName"))
-    if outline_level is not None:
+    outline_level = effective.get("outlineLvl")
+    if isinstance(outline_level, int):
         _set_single_val_child(p_pr, "outlineLvl", str(outline_level))
     _sort_ooxml_children(p_pr, P_PR_ORDER)
     run_effective = rule.get("runEffective")
@@ -451,14 +507,6 @@ def _apply_table_properties(table: ET.Element, payload: dict) -> None:
     if isinstance(table_props.get("cellMargins"), dict):
         _set_table_cell_margins(tbl_pr, table_props["cellMargins"])
     _sort_ooxml_children(tbl_pr, TBL_PR_ORDER)
-
-
-def _outline_level_for_rule(rule_name: object) -> int | None:
-    return {
-        "Paragraph (15)": 0,
-        "Paragraph (16)": 1,
-        "Paragraph (17)": 2,
-    }.get(str(rule_name))
 
 
 def _apply_text_run_properties(paragraph: ET.Element, effective: dict) -> None:

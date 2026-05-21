@@ -171,7 +171,7 @@ def _safe_filename(filename: str) -> str:
 
 
 def _pdf_page_count(pdf_data: bytes) -> int | None:
-    matches = re.findall(rb"/Type\s*/Page\b", pdf_data)
+    matches = re.findall(rb"/Type\s*/Page(?!s)\b", pdf_data)
     if matches:
         return len(matches)
     return None
