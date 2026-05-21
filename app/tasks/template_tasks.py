@@ -32,6 +32,9 @@ def template_ingestion(document_version_id: str) -> dict:
             raise ValueError(f"DocumentVersion not found: {document_version_id}")
         ingest_template_version(db, version)
         return {"document_version_id": document_version_id, "status": "done"}
+    except Exception as exc:
+        _mark_version_failed(db, document_version_id, exc)
+        raise
     finally:
         db.close()
 
@@ -89,6 +92,9 @@ def target_ingestion(document_version_id: str) -> dict:
             "mapping_count": mapping_count,
             "patch_plan_id": patch_plan_id,
         }
+    except Exception as exc:
+        _mark_version_failed(db, document_version_id, exc)
+        raise
     finally:
         db.close()
 
@@ -488,3 +494,15 @@ def _latest_draft_patch_plan(db: Session, document_version_id: str) -> PatchPlan
         .order_by(PatchPlan.created_at.desc())
         .limit(1)
     )
+
+
+def _mark_version_failed(db: Session, document_version_id: str, exc: Exception) -> None:
+    try:
+        version = db.get(DocumentVersion, document_version_id)
+        if version is not None and version.status not in ("done",):
+            version.status = "failed"
+            version.error_message = str(exc)
+            db.add(version)
+            db.commit()
+    except Exception:
+        pass

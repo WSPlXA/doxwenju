@@ -33,7 +33,6 @@ class Settings(BaseSettings):
     agent_run_inline: bool = False
     layout_postprocess_engine: str = "ooxml"
     word_postprocess_timeout_seconds: int = 120
-    moonshot_api_key: str | None = None
     microsoft_graph_tenant_id: str | None = None
     microsoft_graph_client_id: str | None = None
     microsoft_graph_client_secret: str | None = None

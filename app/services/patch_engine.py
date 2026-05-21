@@ -428,8 +428,8 @@ def _apply_paragraph_properties(
         _set_attrs_child(p_pr, "ind", effective["indent"])
     if isinstance(effective.get("numbering"), dict):
         _set_numbering(p_pr, effective["numbering"])
-    outline_level = _outline_level_for_rule(payload.get("ruleName"))
-    if outline_level is not None:
+    outline_level = effective.get("outlineLvl")
+    if isinstance(outline_level, int):
         _set_single_val_child(p_pr, "outlineLvl", str(outline_level))
     _sort_ooxml_children(p_pr, P_PR_ORDER)
     run_effective = rule.get("runEffective")
@@ -451,14 +451,6 @@ def _apply_table_properties(table: ET.Element, payload: dict) -> None:
     if isinstance(table_props.get("cellMargins"), dict):
         _set_table_cell_margins(tbl_pr, table_props["cellMargins"])
     _sort_ooxml_children(tbl_pr, TBL_PR_ORDER)
-
-
-def _outline_level_for_rule(rule_name: object) -> int | None:
-    return {
-        "Paragraph (15)": 0,
-        "Paragraph (16)": 1,
-        "Paragraph (17)": 2,
-    }.get(str(rule_name))
 
 
 def _apply_text_run_properties(paragraph: ET.Element, effective: dict) -> None:

@@ -151,6 +151,13 @@ def parse_properties(container: ET.Element | None) -> dict:
                 "level": attr(ilvl, "w", "val") if ilvl is not None else None,
                 "numId": attr(num_id, "w", "val") if num_id is not None else None,
             }
+        elif name == "outlineLvl":
+            value = attr(child, "w", "val")
+            if value is not None:
+                try:
+                    props["outlineLvl"] = int(value)
+                except (ValueError, TypeError):
+                    pass
         elif name == "pStyle":
             props["paragraphStyle"] = attr(child, "w", "val")
         elif name == "rStyle":
