@@ -1,16 +1,17 @@
 import hashlib
 import json
-import multiprocessing
 import re
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
-from queue import Empty
 
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.document import Document, DocumentVersion
 from app.services.docx_package import inspect_docx_package
+from app.services.ooxml_postprocess import apply_ooxml_layout_postprocess
 
 DOCX_CONTENT_TYPE = (
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -23,6 +24,23 @@ def apply_word_layout_postprocess(
     version = db.get(DocumentVersion, document_version_id)
     if version is None:
         raise ValueError(f"DocumentVersion not found: {document_version_id}")
+
+    if settings.layout_postprocess_engine == "ooxml":
+        raw_output, summary = apply_ooxml_layout_postprocess(version.raw_file)
+        output_version = _store_postprocessed_version(db, version, raw_output)
+        return output_version, {
+            **summary,
+            "status": "done",
+            "sourceDocumentVersionId": version.id,
+            "outputDocumentVersionId": output_version.id,
+        }
+    if settings.layout_postprocess_engine != "word_com":
+        return version, {
+            "status": "skipped",
+            "reason": "unsupported_layout_postprocess_engine",
+            "engine": settings.layout_postprocess_engine,
+            "documentVersionId": version.id,
+        }
 
     win32com = _load_win32com()
     if win32com is None:
@@ -63,38 +81,42 @@ def _load_win32com():
 
 
 def _run_word_postprocess_with_timeout(raw_file: bytes, filename: str) -> tuple[bytes, dict]:
-    context = multiprocessing.get_context("spawn")
-    queue = context.Queue(maxsize=1)
-    process = context.Process(target=_word_postprocess_worker, args=(raw_file, filename, queue))
-    process.start()
-    process.join(settings.word_postprocess_timeout_seconds)
-    if process.is_alive():
-        process.terminate()
-        process.join(10)
-        raise TimeoutError(
-            "Word postprocess timed out after "
-            f"{settings.word_postprocess_timeout_seconds}s"
-        )
-    try:
-        result = queue.get_nowait()
-    except Empty as exc:
-        raise RuntimeError(
-            f"Word postprocess exited without a result: exitcode={process.exitcode}"
-        ) from exc
-    if result["status"] == "error":
-        raise RuntimeError(result["error"])
-    return result["raw_output"], result["summary"]
-
-
-def _word_postprocess_worker(raw_file: bytes, filename: str, queue) -> None:
-    try:
-        win32com = _load_win32com()
-        if win32com is None:
-            raise RuntimeError("pywin32_not_available")
-        raw_output, summary = _postprocess_with_word(raw_file, filename, win32com)
-        queue.put({"status": "ok", "raw_output": raw_output, "summary": summary})
-    except Exception as exc:
-        queue.put({"status": "error", "error": str(exc)})
+    with tempfile.TemporaryDirectory(prefix="doxwenju-word-postprocess-run-") as tmp:
+        tmp_path = Path(tmp)
+        input_path = tmp_path / _safe_docx_name(filename)
+        output_path = tmp_path / f"postprocessed-{input_path.name}"
+        summary_path = tmp_path / "summary.json"
+        input_path.write_bytes(raw_file)
+        command = [
+            sys.executable,
+            "-m",
+            "app.services.word_postprocess",
+            str(input_path),
+            str(output_path),
+            str(summary_path),
+        ]
+        try:
+            completed = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=settings.word_postprocess_timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise TimeoutError(
+                "Word postprocess timed out after "
+                f"{settings.word_postprocess_timeout_seconds}s"
+            ) from exc
+        if completed.returncode != 0:
+            raise RuntimeError(
+                "Word postprocess subprocess failed with code "
+                f"{completed.returncode}. stdout={completed.stdout[-1000:]} "
+                f"stderr={completed.stderr[-1000:]}"
+            )
+        if not output_path.exists() or not summary_path.exists():
+            raise RuntimeError("Word postprocess subprocess did not produce output files")
+        return output_path.read_bytes(), json.loads(summary_path.read_text(encoding="utf-8"))
 
 
 def _postprocess_with_word(raw_file: bytes, filename: str, win32com) -> tuple[bytes, dict]:
@@ -215,6 +237,7 @@ def _rebuild_static_toc(doc, constants: _WordConstants) -> dict:
     if title_paragraph is None:
         return {"tocStatus": "skipped", "tocReason": "title_insert_failed", "tocEntries": 0}
     title_paragraph.OutlineLevel = 10
+    _format_toc_title(title_paragraph, constants)
 
     doc.Range(title_paragraph.Range.End, title_paragraph.Range.End).InsertBreak(
         constants.page_break
@@ -227,17 +250,7 @@ def _rebuild_static_toc(doc, constants: _WordConstants) -> dict:
     headings = _collect_headings(doc, body_paragraph.Range.Start, constants)
     doc.Range(title_paragraph.Range.End, body_paragraph.Range.Start).Delete()
     _write_static_toc_entries(doc, insert_at, title_paragraph, headings, constants)
-    doc.Repaginate()
-
-    body_paragraph = _find_paragraph(doc, "导  论", start_after=insert_at)
-    if body_paragraph is None:
-        return {"tocStatus": "skipped", "tocReason": "body_marker_missing_after_toc", "tocEntries": 0}
-    final_headings = _collect_headings(doc, body_paragraph.Range.Start, constants)
-    doc.Range(title_paragraph.Range.End, body_paragraph.Range.Start).Delete()
-    _write_static_toc_entries(doc, insert_at, title_paragraph, final_headings, constants)
-    _offset_toc_page_numbers(doc, insert_at, offset=1)
-    _format_static_toc(doc, insert_at, constants)
-    return {"tocStatus": "done", "tocEntries": len(final_headings), "tocPageOffset": 1}
+    return {"tocStatus": "done", "tocEntries": len(headings), "tocPageOffset": 1}
 
 
 def _write_static_toc_entries(
@@ -247,14 +260,23 @@ def _write_static_toc_entries(
     headings: list[tuple[int, str, int]],
     constants: _WordConstants,
 ) -> None:
-    lines = "".join(f"{title}\t{page}\r" for _, title, page in headings)
+    # Word reports these heading pages before the final static TOC page break settles.
+    # The existing thesis layout needs a fixed +1 offset after converting to static text.
+    lines = "".join(f"{title}\t{page + 1}\r" for _, title, page in headings)
     doc.Range(title_paragraph.Range.End, title_paragraph.Range.End).InsertAfter(lines)
     body_paragraph = _find_paragraph(doc, "导  论", start_after=insert_at)
     if body_paragraph is not None:
         doc.Range(body_paragraph.Range.Start, body_paragraph.Range.Start).InsertBreak(
             constants.page_break
         )
-    _format_static_toc(doc, insert_at, constants)
+        heading_levels = {title: level for level, title, _ in headings}
+        _format_static_toc_entries(
+            doc,
+            title_paragraph.Range.End,
+            body_paragraph.Range.Start,
+            heading_levels,
+            constants,
+        )
 
 
 def _collect_headings(
@@ -284,81 +306,58 @@ def _collect_headings(
     return headings
 
 
-def _format_static_toc(doc, insert_at: int, constants: _WordConstants) -> None:
-    body_paragraph = _find_paragraph(doc, "导  论", start_after=insert_at)
-    if body_paragraph is None:
-        return
-    toc_end = body_paragraph.Range.Start
+def _format_toc_title(title_paragraph, constants: _WordConstants) -> None:
+    range_obj = title_paragraph.Range
+    range_obj.Font.Color = 0
+    range_obj.Font.Underline = 0
+    range_obj.Font.Name = "Times New Roman"
+    range_obj.Font.NameFarEast = "黑体"
+    range_obj.Font.Size = 18
+    range_obj.Font.Bold = 1
+    title_paragraph.Format.SpaceBefore = 0
+    title_paragraph.Format.SpaceAfter = 0
+    title_paragraph.Format.Alignment = constants.align_center
+    title_paragraph.Format.LineSpacingRule = constants.line_space_exactly
+    title_paragraph.Format.LineSpacing = 24
+    title_paragraph.OutlineLevel = 10
+
+
+def _format_static_toc_entries(
+    doc,
+    toc_start: int,
+    toc_end: int,
+    heading_levels: dict[str, int],
+    constants: _WordConstants,
+) -> None:
     content_width = (
         doc.PageSetup.PageWidth - doc.PageSetup.LeftMargin - doc.PageSetup.RightMargin
     )
-    heading_levels = _heading_level_lookup(doc, body_paragraph.Range.Start)
-    for index in range(1, doc.Paragraphs.Count + 1):
-        paragraph = doc.Paragraphs.Item(index)
-        if paragraph.Range.Start < insert_at or paragraph.Range.Start >= toc_end:
-            continue
+    toc_range = doc.Range(toc_start, toc_end)
+    toc_range.Font.Color = 0
+    toc_range.Font.Underline = 0
+    toc_range.Font.Name = "Times New Roman"
+    toc_range.Font.NameFarEast = "宋体"
+    toc_range.ParagraphFormat.SpaceBefore = 0
+    toc_range.ParagraphFormat.SpaceAfter = 0
+    toc_range.ParagraphFormat.LineSpacingRule = constants.line_space_exactly
+
+    for index in range(1, toc_range.Paragraphs.Count + 1):
+        paragraph = toc_range.Paragraphs.Item(index)
         text = _clean_range_text(paragraph.Range)
-        range_obj = paragraph.Range
-        range_obj.Font.Color = 0
-        range_obj.Font.Underline = 0
-        range_obj.Font.Name = "Times New Roman"
-        range_obj.Font.NameFarEast = "宋体"
-        paragraph.Format.SpaceBefore = 0
-        paragraph.Format.SpaceAfter = 0
-        paragraph.Format.LineSpacingRule = constants.line_space_exactly
-        if text == "目  录":
-            range_obj.Font.NameFarEast = "黑体"
-            range_obj.Font.Size = 18
-            range_obj.Font.Bold = 1
-            paragraph.Format.Alignment = constants.align_center
-            paragraph.Format.LineSpacing = 24
-            paragraph.OutlineLevel = 10
-        elif "\t" in paragraph.Range.Text:
-            title = paragraph.Range.Text.replace("\r", "").replace("\x07", "").split("\t", 1)[0].strip()
-            level = heading_levels.get(title, 1)
-            range_obj.Font.Size = 10.5
-            range_obj.Font.Bold = 0
-            paragraph.Format.Alignment = constants.align_left
-            paragraph.Format.LineSpacing = 13
-            paragraph.Format.LeftIndent = (level - 1) * 21
-            paragraph.Format.FirstLineIndent = 0
-            paragraph.Format.TabStops.ClearAll()
-            paragraph.Format.TabStops.Add(
-                content_width, constants.align_tab_right, constants.tab_leader_dots
-            )
-
-
-def _offset_toc_page_numbers(doc, insert_at: int, offset: int) -> None:
-    body_paragraph = _find_paragraph(doc, "导  论", start_after=insert_at)
-    if body_paragraph is None:
-        return
-    for index in range(1, doc.Paragraphs.Count + 1):
-        paragraph = doc.Paragraphs.Item(index)
-        if paragraph.Range.Start <= insert_at or paragraph.Range.Start >= body_paragraph.Range.Start:
+        if "\t" not in paragraph.Range.Text or not text:
             continue
-        raw = paragraph.Range.Text
-        if "\t" not in raw:
-            continue
-        text = raw.replace("\r", "").replace("\x07", "")
-        match = re.match(r"^(.*\t)(\d+)\s*$", text)
-        if match:
-            paragraph.Range.Text = f"{match.group(1)}{int(match.group(2)) + offset}\r"
-
-
-def _heading_level_lookup(doc, body_start: int) -> dict[str, int]:
-    lookup = {}
-    for index in range(1, doc.Paragraphs.Count + 1):
-        paragraph = doc.Paragraphs.Item(index)
-        if paragraph.Range.Start < body_start:
-            continue
-        text = _clean_range_text(paragraph.Range)
-        try:
-            level = int(paragraph.OutlineLevel)
-        except Exception:
-            continue
-        if 1 <= level <= 3 and text:
-            lookup.setdefault(text, level)
-    return lookup
+        title = text.split("\t", 1)[0].strip()
+        level = heading_levels.get(title, 1)
+        paragraph.Range.Font.Size = 10.5
+        paragraph.Range.Font.Bold = 0
+        paragraph.Format.Alignment = constants.align_left
+        paragraph.Format.LineSpacing = 13
+        paragraph.Format.LeftIndent = (level - 1) * 21
+        paragraph.Format.FirstLineIndent = 0
+        paragraph.Format.TabStops.ClearAll()
+        paragraph.Format.TabStops.Add(
+            content_width, constants.align_tab_right, constants.tab_leader_dots
+        )
 
 
 def _force_black_text(doc) -> None:
@@ -418,3 +417,26 @@ def _store_postprocessed_version(
 
 def postprocess_summary_json(summary: dict) -> str:
     return json.dumps(summary, ensure_ascii=False, sort_keys=True)
+
+
+def _main() -> int:
+    if len(sys.argv) != 4:
+        print("usage: python -m app.services.word_postprocess INPUT.docx OUTPUT.docx SUMMARY.json")
+        return 2
+    win32com = _load_win32com()
+    if win32com is None:
+        print("pywin32 is not available", file=sys.stderr)
+        return 3
+    input_path = Path(sys.argv[1])
+    output_path = Path(sys.argv[2])
+    summary_path = Path(sys.argv[3])
+    raw_output, summary = _postprocess_with_word(
+        input_path.read_bytes(), input_path.name, win32com
+    )
+    output_path.write_bytes(raw_output)
+    summary_path.write_text(postprocess_summary_json(summary), encoding="utf-8")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())

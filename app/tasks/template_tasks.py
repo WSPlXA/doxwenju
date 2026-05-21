@@ -69,13 +69,15 @@ def target_ingestion(document_version_id: str) -> dict:
         template_version = db.scalar(
             select(DocumentVersion)
             .join(Document)
-            .where(Document.is_current_template.is_(True), DocumentVersion.status == "done")
+            .where(Document.is_current_template.is_(True))
             .order_by(DocumentVersion.version.desc(), DocumentVersion.created_at.desc())
             .limit(1)
         )
         mapping_count = 0
         patch_plan_id = None
         if template_version is not None:
+            if template_version.status != "done":
+                ingest_template_version(db, template_version)
             mapping_count = len(
                 rebuild_mapping_results(db, document_version_id, template_version.id)
             )

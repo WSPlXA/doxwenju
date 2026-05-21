@@ -7,9 +7,11 @@ from xml.etree import ElementTree as ET
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from app.api.targets import _latest_output_version
 from app.core.config import settings
 from app.db.base import Base
 from app.models.document import (
+    AgentRun,
     Document,
     DocumentVersion,
     FormatProfile,
@@ -29,6 +31,7 @@ from app.services.rendering import render_libreoffice_precheck
 from app.services.repair_planner import build_internal_repair_plan
 from app.services.target_mapping import rebuild_mapping_results
 from app.services.word_postprocess import apply_word_layout_postprocess
+from app.tasks.template_tasks import target_ingestion
 from tests.fixtures.docx_builder import build_minimal_docx
 
 NS = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
@@ -559,7 +562,9 @@ def test_render_precheck_records_skipped_when_libreoffice_missing():
 
 def test_word_postprocess_skips_when_word_com_is_unavailable(monkeypatch):
     db = _sqlite_session()
+    original_engine = settings.layout_postprocess_engine
     try:
+        settings.layout_postprocess_engine = "word_com"
         version = _version(db, "output", build_minimal_docx())
         monkeypatch.setattr("app.services.word_postprocess._load_win32com", lambda: None)
 
@@ -570,12 +575,15 @@ def test_word_postprocess_skips_when_word_com_is_unavailable(monkeypatch):
         assert summary["status"] == "skipped"
         assert summary["reason"] == "pywin32_not_available"
     finally:
+        settings.layout_postprocess_engine = original_engine
         db.close()
 
 
 def test_word_postprocess_keeps_source_when_word_processing_fails(monkeypatch):
     db = _sqlite_session()
+    original_engine = settings.layout_postprocess_engine
     try:
+        settings.layout_postprocess_engine = "word_com"
         version = _version(db, "output", build_minimal_docx())
         monkeypatch.setattr(
             "app.services.word_postprocess._load_win32com", lambda: object()
@@ -595,5 +603,139 @@ def test_word_postprocess_keeps_source_when_word_processing_fails(monkeypatch):
         assert summary["status"] == "skipped"
         assert summary["reason"] == "word_postprocess_failed"
         assert "timed out" in summary["error"]
+    finally:
+        settings.layout_postprocess_engine = original_engine
+        db.close()
+
+
+def test_ooxml_postprocess_updates_layout_settings_and_toc_field(monkeypatch):
+    db = _sqlite_session()
+    original_engine = settings.layout_postprocess_engine
+    try:
+        settings.layout_postprocess_engine = "ooxml"
+        monkeypatch.setattr(
+            "app.services.ooxml_postprocess._libreoffice_executable", lambda: None
+        )
+        version = _version(db, "output", build_minimal_docx())
+
+        output, summary = apply_word_layout_postprocess(db, version.id)
+
+        assert output.id != version.id
+        assert summary["status"] == "done"
+        assert summary["layoutEngine"] == "ooxml_v0"
+        assert summary["tocStatus"] == "skipped"
+        parts = {part.name: part.data for part in inspect_docx_package(output.raw_file)}
+        document = ET.fromstring(parts["word/document.xml"])
+        sect_pr = document.find(".//w:sectPr", NS)
+        assert sect_pr is not None
+        assert sect_pr.find("w:pgSz", NS).attrib[f"{{{NS['w']}}}w"] == "11906"
+        assert sect_pr.find("w:pgMar", NS).attrib[f"{{{NS['w']}}}left"] == "1418"
+        settings_root = ET.fromstring(parts["word/settings.xml"])
+        update_fields = settings_root.find("w:updateFields", NS)
+        assert update_fields is not None
+        assert update_fields.attrib[f"{{{NS['w']}}}val"] == "true"
+    finally:
+        settings.layout_postprocess_engine = original_engine
+        db.close()
+
+
+def test_ooxml_postprocess_replaces_static_toc_with_updateable_field(monkeypatch):
+    db = _sqlite_session()
+    original_engine = settings.layout_postprocess_engine
+    document_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>
+    <w:p><w:r><w:t>目  录</w:t></w:r></w:p>
+    <w:p><w:r><w:t>旧目录项</w:t></w:r></w:p>
+    <w:p><w:r><w:t>导  论</w:t></w:r></w:p>
+    <w:p><w:pPr><w:outlineLvl w:val="0"/></w:pPr><w:r><w:t>第一章</w:t></w:r></w:p>
+    <w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr>
+  </w:body>
+</w:document>
+"""
+    try:
+        settings.layout_postprocess_engine = "ooxml"
+        monkeypatch.setattr(
+            "app.services.ooxml_postprocess._libreoffice_executable", lambda: None
+        )
+        version = _version(
+            db,
+            "output",
+            build_minimal_docx(extra_files={"word/document.xml": document_xml}),
+        )
+
+        output, summary = apply_word_layout_postprocess(db, version.id)
+
+        assert summary["tocStatus"] == "field_inserted"
+        document = ET.fromstring(
+            {part.name: part.data for part in inspect_docx_package(output.raw_file)}[
+                "word/document.xml"
+            ]
+        )
+        assert "旧目录项" not in "".join(document.itertext())
+        field = document.find(".//w:fldSimple", NS)
+        assert field is not None
+        assert field.attrib[f"{{{NS['w']}}}instr"] == 'TOC \\o "1-3" \\h \\z \\u'
+    finally:
+        settings.layout_postprocess_engine = original_engine
+        db.close()
+
+
+def test_latest_output_prefers_agent_current_output():
+    db = _sqlite_session()
+    try:
+        target = _version(db, "target", build_minimal_docx())
+        patch_output = _version(db, "output", build_minimal_docx())
+        agent_output = _version(db, "output", build_minimal_docx())
+        template = _version(db, "template", build_minimal_docx())
+        plan = PatchPlan(
+            document_version_id=target.id,
+            template_document_version_id=template.id,
+            round_number=1,
+            status="applied",
+            source="test",
+            summary={},
+            output_document_version_id=patch_output.id,
+        )
+        run = AgentRun(
+            target_document_version_id=target.id,
+            template_document_version_id=template.id,
+            current_output_document_version_id=agent_output.id,
+            status="done",
+            summary={},
+        )
+        db.add_all([plan, run])
+        db.commit()
+
+        output = _latest_output_version(db)
+
+        assert output is not None
+        assert output.id == agent_output.id
+    finally:
+        db.close()
+
+
+def test_target_ingestion_builds_plan_when_current_template_was_requeued(monkeypatch):
+    db = _sqlite_session()
+    try:
+        template = _version(db, "template", build_minimal_docx())
+        target = _version(db, "target", build_minimal_docx())
+        template.status = "queued"
+        template.progress = 0
+        db.add(template)
+        db.commit()
+
+        class SessionFactory:
+            def __call__(self):
+                return db
+
+        monkeypatch.setattr("app.tasks.template_tasks.SessionLocal", SessionFactory())
+        result = target_ingestion(target.id)
+
+        assert result["status"] == "done"
+        assert result["mapping_count"] > 0
+        assert result["patch_plan_id"] is not None
+        assert template.status == "done"
     finally:
         db.close()

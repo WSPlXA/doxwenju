@@ -227,10 +227,16 @@ def start_latest_target_agent_run(
     db.commit()
     db.refresh(run)
 
-    task = format_agent_run.delay(run.id)
+    if settings.agent_run_inline:
+        format_agent_run(run.id)
+        db.refresh(run)
+        task_id = "inline"
+    else:
+        task = format_agent_run.delay(run.id)
+        task_id = task.id
     return AgentRunStartResponse(
         agent_run_id=run.id,
-        task_id=task.id,
+        task_id=task_id,
         status=run.status,
         max_rounds=run.max_rounds,
     )
@@ -293,20 +299,9 @@ def latest_target_patch_execution(db: Session = Depends(get_db)):
 
 @router.get("/latest/output.docx")
 def download_latest_target_output(db: Session = Depends(get_db)):
-    version = _latest_target_version(db)
-    if version is None:
-        raise HTTPException(status_code=404, detail="No target document")
-    plan = db.scalar(
-        select(PatchPlan)
-        .where(PatchPlan.document_version_id == version.id)
-        .order_by(PatchPlan.created_at.desc())
-        .limit(1)
-    )
-    if plan is None or plan.output_document_version_id is None:
-        raise HTTPException(status_code=404, detail="No patched output for latest target")
-    output = db.get(DocumentVersion, plan.output_document_version_id)
+    output = _latest_output_version(db)
     if output is None:
-        raise HTTPException(status_code=404, detail="Output document version is missing")
+        raise HTTPException(status_code=404, detail="No patched output for latest target")
     return Response(
         content=output.raw_file,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -438,6 +433,17 @@ def _latest_output_version(db: Session) -> DocumentVersion | None:
     version = _latest_target_version(db)
     if version is None:
         return None
+    agent_run = db.scalar(
+        select(AgentRun)
+        .where(AgentRun.target_document_version_id == version.id)
+        .where(AgentRun.current_output_document_version_id.is_not(None))
+        .order_by(AgentRun.created_at.desc())
+        .limit(1)
+    )
+    if agent_run is not None and agent_run.current_output_document_version_id is not None:
+        agent_output = db.get(DocumentVersion, agent_run.current_output_document_version_id)
+        if agent_output is not None:
+            return agent_output
     plan = db.scalar(
         select(PatchPlan)
         .where(PatchPlan.document_version_id == version.id)
