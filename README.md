@@ -43,6 +43,8 @@ curl -OJ http://localhost:8000/targets/latest/output.docx
 curl -X POST http://localhost:8000/targets/latest/render-precheck
 curl http://localhost:8000/targets/latest/render-snapshot
 curl -OJ http://localhost:8000/targets/latest/render.pdf
+curl -X POST "http://localhost:8000/targets/latest/agent-run?max_rounds=3"
+curl http://localhost:8000/targets/latest/agent-run/status
 ```
 
 ## Scope
@@ -63,16 +65,23 @@ Implemented in this MVP:
 - Optional Gemini structured-output rerank for top mapping candidates, with deterministic
   fallback when disabled or unavailable.
 - Draft-only deterministic patch plans and patch operations generated from mapping results.
-- Conservative OOXML patch execution v0 for paragraph-like operations, producing a new
-  output DOCX while skipping tables, images, notes, headers, and footers.
+- Conservative OOXML patch execution v0 for paragraph, heading, table, note, and
+  header/footer paragraph operations, producing a new output DOCX while skipping
+  unsupported high-risk edits.
+- Optional Word COM layout postprocess for agent outputs. On Windows with pywin32 and
+  Microsoft Word installed, the agent can normalize page setup, cover table spacing,
+  header/footer text, and a static TOC in an isolated subprocess. In Docker/Linux or
+  when Word automation times out, this stage is recorded as skipped and the agent keeps
+  the deterministic OOXML output.
 - LibreOffice headless render precheck for patched outputs, storing PDF bytes when
   LibreOffice is available and a skipped snapshot when it is not installed.
+- Autonomous deterministic format agent run loop with persisted run/step records,
+  batched patch execution, Word postprocess, render precheck, and bounded internal
+  repair rounds.
 
 Reserved for later phases:
 
 - Gemini profile generation and visual review calls.
-- Specialized OOXML patch execution for tables, images, notes, headers, and footers.
+- Specialized OOXML patch execution for images and complex section/header/footer layout.
 - Microsoft Graph / Word rendering as final visual truth.
-- OOXML patch engine.
-- Word/Graph and LibreOffice rendering.
 - Multi-agent review and auto-repair.

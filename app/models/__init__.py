@@ -1,4 +1,6 @@
 from app.models.document import (
+    AgentRun,
+    AgentStep,
     Document,
     DocumentVersion,
     FormatAtom,
@@ -19,6 +21,8 @@ from app.models.document import (
 
 __all__ = [
     "Document",
+    "AgentRun",
+    "AgentStep",
     "DocumentVersion",
     "FormatAtom",
     "FormatProfile",

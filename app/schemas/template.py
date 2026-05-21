@@ -169,6 +169,41 @@ class RenderSnapshotResponse(BaseModel):
     error_message: str | None
 
 
+class AgentRunStartResponse(BaseModel):
+    agent_run_id: str
+    task_id: str
+    status: str
+    max_rounds: int
+
+
+class AgentStepResponse(BaseModel):
+    id: str
+    round_number: int
+    step_type: str
+    status: str
+    patch_plan_id: str | None
+    patch_execution_id: str | None
+    render_snapshot_id: str | None
+    summary: dict
+    error_message: str | None
+    created_at: datetime
+
+
+class AgentRunResponse(BaseModel):
+    id: str
+    target_document_version_id: str
+    template_document_version_id: str
+    current_output_document_version_id: str | None
+    status: str
+    round_count: int
+    max_rounds: int
+    summary: dict
+    error_message: str | None
+    created_at: datetime
+    updated_at: datetime
+    steps: list[AgentStepResponse]
+
+
 class PageResponse(BaseModel):
     items: list
     limit: int

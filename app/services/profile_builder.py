@@ -1,6 +1,6 @@
 from collections import Counter, defaultdict
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.document import FormatAtom, FormatProfile, ProfileRule
@@ -18,38 +18,62 @@ def rebuild_deterministic_profile(
             .order_by(FormatAtom.created_at, FormatAtom.id)
         )
     )
-    db.execute(delete(ProfileRule).where(ProfileRule.document_version_id == document_version_id))
-    db.execute(
-        delete(FormatProfile).where(FormatProfile.document_version_id == document_version_id)
+    profile = db.scalar(
+        select(FormatProfile)
+        .where(FormatProfile.document_version_id == document_version_id)
+        .order_by(FormatProfile.created_at)
     )
-    db.flush()
-
-    profile = FormatProfile(
-        document_version_id=document_version_id,
-        name=name,
-        version=1,
-        status="active",
-        source=PROFILE_SOURCE,
-        summary=_profile_summary(atoms),
-    )
-    db.add(profile)
-    db.flush()
-
-    for rule in _build_rules(atoms):
-        db.add(
-            ProfileRule(
-                profile_id=profile.id,
-                document_version_id=document_version_id,
-                rule_type=rule["rule_type"],
-                element_category=rule["element_category"],
-                name=rule["name"],
-                priority=rule["priority"],
-                selector=rule["selector"],
-                properties=rule["properties"],
-                source_atom_ids=rule["source_atom_ids"],
-                confidence=rule["confidence"],
-            )
+    if profile is None:
+        profile = FormatProfile(
+            document_version_id=document_version_id,
+            name=name,
+            version=1,
+            status="active",
+            source=PROFILE_SOURCE,
+            summary=_profile_summary(atoms),
         )
+        db.add(profile)
+    else:
+        profile.name = name
+        profile.version += 1
+        profile.status = "active"
+        profile.source = PROFILE_SOURCE
+        profile.summary = _profile_summary(atoms)
+    db.flush()
+
+    existing_rules = {
+        rule.name: rule
+        for rule in db.scalars(
+            select(ProfileRule).where(ProfileRule.document_version_id == document_version_id)
+        )
+    }
+    for rule in _build_rules(atoms):
+        existing = existing_rules.get(rule["name"])
+        if existing is None:
+            db.add(
+                ProfileRule(
+                    profile_id=profile.id,
+                    document_version_id=document_version_id,
+                    rule_type=rule["rule_type"],
+                    element_category=rule["element_category"],
+                    name=rule["name"],
+                    priority=rule["priority"],
+                    selector=rule["selector"],
+                    properties=rule["properties"],
+                    source_atom_ids=rule["source_atom_ids"],
+                    confidence=rule["confidence"],
+                )
+            )
+        else:
+            existing.profile_id = profile.id
+            existing.rule_type = rule["rule_type"]
+            existing.element_category = rule["element_category"]
+            existing.priority = rule["priority"]
+            existing.selector = rule["selector"]
+            existing.properties = rule["properties"]
+            existing.source_atom_ids = rule["source_atom_ids"]
+            existing.confidence = rule["confidence"]
+            db.add(existing)
     db.commit()
     db.refresh(profile)
     return profile
@@ -99,20 +123,23 @@ def _document_rules(atoms: list[FormatAtom]) -> list[dict]:
 
 def _style_category_rules(atoms: list[FormatAtom]) -> list[dict]:
     grouped: dict[tuple[str, str], list[FormatAtom]] = defaultdict(list)
+    run_grouped: dict[tuple[str, str], list[FormatAtom]] = defaultdict(list)
     eligible = {"heading", "paragraph", "list", "caption", "citation", "header_footer"}
     for atom in atoms:
         category = atom.element_category or atom.atom_type
         if category not in eligible:
             continue
-        if atom.atom_type not in {"heading", "paragraph", "list", "header_footer"}:
-            continue
         key = (category, atom.style_id or "__no_style__")
-        grouped[key].append(atom)
+        if atom.atom_type in {"heading", "paragraph", "list", "header_footer"}:
+            grouped[key].append(atom)
+        elif atom.atom_type == "run":
+            run_grouped[key].append(atom)
 
     rules: list[dict] = []
     for (category, style_id), group in sorted(grouped.items()):
         representative = _choose_representative(group)
         effective = representative.normalized.get("effective", {})
+        run_effective = _run_effective_for_group(run_grouped.get((category, style_id), []))
         selector = {"elementCategory": category}
         if style_id != "__no_style__":
             selector["styleId"] = style_id
@@ -127,6 +154,7 @@ def _style_category_rules(atoms: list[FormatAtom]) -> list[dict]:
                 "selector": selector,
                 "properties": {
                     "effective": effective,
+                    "runEffective": run_effective,
                     "textSamples": _text_samples(group),
                     "occurrenceCount": len(group),
                 },
@@ -175,6 +203,36 @@ def _single_category_rules(atoms: list[FormatAtom]) -> list[dict]:
 
 def _choose_representative(atoms: list[FormatAtom]) -> FormatAtom:
     return max(atoms, key=lambda atom: len(atom.text_summary or ""))
+
+
+def _run_effective_for_group(atoms: list[FormatAtom]) -> dict:
+    if not atoms:
+        return {}
+    effective_items = [
+        atom.normalized.get("effective", {}) for atom in atoms if atom.normalized.get("effective")
+    ]
+    preferred = [item for item in effective_items if item.get("color") != "FF0000"]
+    pool = preferred or effective_items
+    if not pool:
+        return {}
+    counts = Counter(_run_signature(item) for item in pool)
+    signature, _ = counts.most_common(1)[0]
+    for item in pool:
+        if _run_signature(item) == signature:
+            return item
+    return pool[0]
+
+
+def _run_signature(effective: dict) -> tuple:
+    fonts = effective.get("fonts") if isinstance(effective.get("fonts"), dict) else {}
+    return (
+        effective.get("b"),
+        effective.get("i"),
+        effective.get("sz"),
+        fonts.get("eastAsia"),
+        fonts.get("ascii"),
+        fonts.get("hAnsi"),
+    )
 
 
 def _text_samples(atoms: list[FormatAtom]) -> list[str]:

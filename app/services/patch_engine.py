@@ -22,6 +22,7 @@ ET.register_namespace("w", NS["w"])
 ET.register_namespace("r", NS["r"])
 ET.register_namespace("wp", NS["wp"])
 ET.register_namespace("a", NS["a"])
+ET.register_namespace("mc", NS["mc"])
 
 SUPPORTED_OPERATIONS = {
     "apply_endnote_rule",
@@ -33,6 +34,109 @@ SUPPORTED_OPERATIONS = {
     "apply_caption_rule",
     "apply_citation_rule",
     "apply_paragraph_rule",
+}
+
+P_PR_ORDER = {
+    "pStyle": 10,
+    "keepNext": 20,
+    "keepLines": 30,
+    "pageBreakBefore": 40,
+    "framePr": 50,
+    "widowControl": 60,
+    "numPr": 70,
+    "suppressLineNumbers": 80,
+    "pBdr": 90,
+    "shd": 100,
+    "tabs": 110,
+    "suppressAutoHyphens": 120,
+    "kinsoku": 130,
+    "wordWrap": 140,
+    "overflowPunct": 150,
+    "topLinePunct": 160,
+    "autoSpaceDE": 170,
+    "autoSpaceDN": 180,
+    "bidi": 190,
+    "adjustRightInd": 200,
+    "snapToGrid": 210,
+    "spacing": 220,
+    "ind": 230,
+    "contextualSpacing": 240,
+    "mirrorIndents": 250,
+    "suppressOverlap": 260,
+    "jc": 270,
+    "textDirection": 280,
+    "textAlignment": 290,
+    "textboxTightWrap": 300,
+    "outlineLvl": 310,
+    "divId": 320,
+    "cnfStyle": 330,
+    "rPr": 340,
+    "sectPr": 350,
+    "pPrChange": 360,
+}
+
+TBL_PR_ORDER = {
+    "tblStyle": 10,
+    "tblpPr": 20,
+    "tblOverlap": 30,
+    "bidiVisual": 40,
+    "tblStyleRowBandSize": 50,
+    "tblStyleColBandSize": 60,
+    "tblW": 70,
+    "jc": 80,
+    "tblCellSpacing": 90,
+    "tblInd": 100,
+    "tblBorders": 110,
+    "shd": 120,
+    "tblLayout": 130,
+    "tblCellMar": 140,
+    "tblLook": 150,
+    "tblCaption": 160,
+    "tblDescription": 170,
+    "tblPrChange": 180,
+}
+
+R_PR_ORDER = {
+    "rStyle": 10,
+    "rFonts": 20,
+    "b": 30,
+    "bCs": 40,
+    "i": 50,
+    "iCs": 60,
+    "caps": 70,
+    "smallCaps": 80,
+    "strike": 90,
+    "dstrike": 100,
+    "outline": 110,
+    "shadow": 120,
+    "emboss": 130,
+    "imprint": 140,
+    "noProof": 150,
+    "snapToGrid": 160,
+    "vanish": 170,
+    "webHidden": 180,
+    "color": 190,
+    "spacing": 200,
+    "w": 210,
+    "kern": 220,
+    "position": 230,
+    "sz": 240,
+    "szCs": 250,
+    "highlight": 260,
+    "u": 270,
+    "effect": 280,
+    "bdr": 290,
+    "shd": 300,
+    "fitText": 310,
+    "vertAlign": 320,
+    "rtl": 330,
+    "cs": 340,
+    "em": 350,
+    "lang": 360,
+    "eastAsianLayout": 370,
+    "specVanish": 380,
+    "oMath": 390,
+    "rPrChange": 400,
 }
 
 
@@ -83,10 +187,9 @@ def _apply_plan_to_docx(db: Session, raw_file: bytes, plan: PatchPlan) -> tuple[
     if document_xml is None:
         raise ValueError("DOCX is missing word/document.xml")
     root = parse_xml(document_xml)
+    available_style_ids = _available_style_ids(parts.get("word/styles.xml"))
     paragraphs = root.findall("./w:body/w:p", NS)
     tables = root.findall("./w:body/w:tbl", NS)
-    note_roots = _parse_note_roots(parts)
-    header_footer_roots = _parse_header_footer_roots(parts)
 
     operations = list(
         db.scalars(
@@ -94,6 +197,17 @@ def _apply_plan_to_docx(db: Session, raw_file: bytes, plan: PatchPlan) -> tuple[
             .where(PatchOperation.patch_plan_id == plan.id)
             .order_by(PatchOperation.created_at, PatchOperation.id)
         )
+    )
+    needs_note_parts = any(
+        operation.operation_type in {"apply_footnote_rule", "apply_endnote_rule"}
+        for operation in operations
+    )
+    needs_header_footer_parts = any(
+        operation.operation_type == "apply_header_footer_rule" for operation in operations
+    )
+    note_roots = _parse_note_roots(parts) if needs_note_parts else {}
+    header_footer_roots = (
+        _parse_header_footer_roots(parts) if needs_header_footer_parts else {}
     )
     counts = Counter()
     for operation in operations:
@@ -107,7 +221,7 @@ def _apply_plan_to_docx(db: Session, raw_file: bytes, plan: PatchPlan) -> tuple[
             db.add(operation)
             continue
         applied = _apply_supported_operation(
-            paragraphs, tables, note_roots, header_footer_roots, operation
+            paragraphs, tables, note_roots, header_footer_roots, operation, available_style_ids
         )
         if not applied:
             counts["skipped"] += 1
@@ -117,11 +231,11 @@ def _apply_plan_to_docx(db: Session, raw_file: bytes, plan: PatchPlan) -> tuple[
         counts["applied"] += 1
         db.add(operation)
 
-    parts["word/document.xml"] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+    parts["word/document.xml"] = _serialize_xml(root)
     for part_name, note_root in note_roots.items():
-        parts[part_name] = ET.tostring(note_root, encoding="utf-8", xml_declaration=True)
+        parts[part_name] = _serialize_xml(note_root)
     for part_name, part_root in header_footer_roots.items():
-        parts[part_name] = ET.tostring(part_root, encoding="utf-8", xml_declaration=True)
+        parts[part_name] = _serialize_xml(part_root)
     output = _zip_parts(parts)
     inspect_docx_package(output)
     db.commit()
@@ -139,6 +253,7 @@ def _apply_supported_operation(
     note_roots: dict[str, ET.Element],
     header_footer_roots: dict[str, ET.Element],
     operation: PatchOperation,
+    available_style_ids: set[str],
 ) -> bool:
     if operation.operation_type == "apply_table_rule":
         table = _table_for_operation(tables, operation)
@@ -161,7 +276,7 @@ def _apply_supported_operation(
                 "skipReason": "note_paragraph_not_found_or_not_paragraph_level",
             }
             return False
-        _apply_paragraph_properties(paragraph, operation.payload)
+        _apply_paragraph_properties(paragraph, operation.payload, available_style_ids)
         return True
 
     if operation.operation_type == "apply_header_footer_rule":
@@ -173,7 +288,7 @@ def _apply_supported_operation(
                 "skipReason": "header_footer_paragraph_not_found",
             }
             return False
-        _apply_paragraph_properties(paragraph, operation.payload)
+        _apply_paragraph_properties(paragraph, operation.payload, available_style_ids)
         return True
 
     paragraph = _paragraph_for_operation(paragraphs, operation)
@@ -184,7 +299,7 @@ def _apply_supported_operation(
             "skipReason": "paragraph_not_found_or_not_top_level",
         }
         return False
-    _apply_paragraph_properties(paragraph, operation.payload)
+    _apply_paragraph_properties(paragraph, operation.payload, available_style_ids)
     return True
 
 
@@ -253,12 +368,19 @@ def _note_paragraph_for_operation(
 
     note_local = "footnote" if operation.operation_type == "apply_footnote_rule" else "endnote"
     xml_path = operation.xml_path or ""
-    match = re.search(rf"/w:{note_local}s/w:{note_local}\[(\d+)\]/w:p\[(\d+)\]$", xml_path)
-    if not match:
+    paragraph_match = re.search(
+        rf"/w:{note_local}s/w:{note_local}\[(\d+)\]/w:p\[(\d+)\](?:/.*)?$", xml_path
+    )
+    note_match = re.search(rf"/w:{note_local}s/w:{note_local}\[(\d+)\]$", xml_path)
+    if paragraph_match:
+        note_index = int(paragraph_match.group(1)) - 1
+        paragraph_index = int(paragraph_match.group(2)) - 1
+    elif note_match:
+        note_index = int(note_match.group(1)) - 1
+        paragraph_index = 0
+    else:
         return None
 
-    note_index = int(match.group(1)) - 1
-    paragraph_index = int(match.group(2)) - 1
     notes = root.findall(f"w:{note_local}", NS)
     if note_index < 0 or note_index >= len(notes):
         return None
@@ -282,14 +404,16 @@ def _table_for_operation(tables: list[ET.Element], operation: PatchOperation) ->
     return tables[index]
 
 
-def _apply_paragraph_properties(paragraph: ET.Element, payload: dict) -> None:
+def _apply_paragraph_properties(
+    paragraph: ET.Element, payload: dict, available_style_ids: set[str]
+) -> None:
     rule = payload.get("ruleProperties", {})
     effective = rule.get("effective") or rule.get("representative", {}).get("effective") or {}
     selector = payload.get("ruleSelector", {})
     p_pr = _get_or_insert_first(paragraph, qn("w", "pPr"))
 
     style_id = selector.get("styleId") or effective.get("paragraphStyle")
-    if style_id:
+    if style_id and style_id in available_style_ids:
         _set_single_val_child(p_pr, "pStyle", str(style_id), first=True)
 
     if effective.get("alignment"):
@@ -304,6 +428,13 @@ def _apply_paragraph_properties(paragraph: ET.Element, payload: dict) -> None:
         _set_attrs_child(p_pr, "ind", effective["indent"])
     if isinstance(effective.get("numbering"), dict):
         _set_numbering(p_pr, effective["numbering"])
+    outline_level = _outline_level_for_rule(payload.get("ruleName"))
+    if outline_level is not None:
+        _set_single_val_child(p_pr, "outlineLvl", str(outline_level))
+    _sort_ooxml_children(p_pr, P_PR_ORDER)
+    run_effective = rule.get("runEffective")
+    if isinstance(run_effective, dict) and run_effective:
+        _apply_text_run_properties(paragraph, run_effective)
 
 
 def _apply_table_properties(table: ET.Element, payload: dict) -> None:
@@ -319,6 +450,60 @@ def _apply_table_properties(table: ET.Element, payload: dict) -> None:
         _set_table_borders(tbl_pr, table_props["borders"])
     if isinstance(table_props.get("cellMargins"), dict):
         _set_table_cell_margins(tbl_pr, table_props["cellMargins"])
+    _sort_ooxml_children(tbl_pr, TBL_PR_ORDER)
+
+
+def _outline_level_for_rule(rule_name: object) -> int | None:
+    return {
+        "Paragraph (15)": 0,
+        "Paragraph (16)": 1,
+        "Paragraph (17)": 2,
+    }.get(str(rule_name))
+
+
+def _apply_text_run_properties(paragraph: ET.Element, effective: dict) -> None:
+    for run in paragraph.findall("w:r", NS):
+        if run.find("w:t", NS) is None:
+            continue
+        r_pr = _get_or_insert_first(run, qn("w", "rPr"))
+        fonts = effective.get("fonts")
+        if isinstance(fonts, dict):
+            _set_run_fonts(r_pr, fonts)
+        if effective.get("b") is True:
+            _ensure_empty_child(r_pr, "b")
+        if effective.get("i") is True:
+            _ensure_empty_child(r_pr, "i")
+        if effective.get("caps") is True:
+            _ensure_empty_child(r_pr, "caps")
+        if effective.get("smallCaps") is True:
+            _ensure_empty_child(r_pr, "smallCaps")
+        if effective.get("sz") is not None:
+            half_points = _half_point_value(effective["sz"])
+            _set_single_val_child(r_pr, "sz", half_points)
+            _set_single_val_child(r_pr, "szCs", half_points)
+        _sort_ooxml_children(r_pr, R_PR_ORDER)
+
+
+def _set_run_fonts(r_pr: ET.Element, fonts: dict) -> None:
+    child = r_pr.find("w:rFonts", NS)
+    if child is None:
+        child = ET.SubElement(r_pr, qn("w", "rFonts"))
+    for key in ("ascii", "eastAsia", "hAnsi", "cs", "asciiTheme", "eastAsiaTheme"):
+        value = fonts.get(key)
+        if value:
+            child.set(qn("w", key), str(value))
+
+
+def _half_point_value(value: object) -> str:
+    if isinstance(value, int):
+        return str(value * 2)
+    if isinstance(value, float):
+        return str(int(round(value * 2)))
+    text = str(value)
+    try:
+        return str(int(round(float(text) * 2)))
+    except ValueError:
+        return text
 
 
 def _get_or_insert_first(parent: ET.Element, tag: str) -> ET.Element:
@@ -399,6 +584,59 @@ def _set_table_cell_margins(tbl_pr: ET.Element, margins: dict) -> None:
         for key, value in attrs.items():
             if value is not None:
                 margin.set(qn("w", key), str(value))
+
+
+def _sort_ooxml_children(parent: ET.Element, order: dict[str, int]) -> None:
+    children = list(parent)
+    if len(children) < 2:
+        return
+
+    def sort_key(item: tuple[int, ET.Element]) -> tuple[int, int]:
+        index, child = item
+        local_name = child.tag.rsplit("}", 1)[-1]
+        return (order.get(local_name, 10_000), index)
+
+    parent[:] = [child for _, child in sorted(enumerate(children), key=sort_key)]
+
+
+def _available_style_ids(styles_xml: bytes | None) -> set[str]:
+    if not styles_xml:
+        return set()
+    root = parse_xml(styles_xml)
+    return {
+        style_id
+        for style in root.findall("w:style", NS)
+        if (style_id := style.attrib.get(qn("w", "styleId")))
+    }
+
+
+def _serialize_xml(root: ET.Element) -> bytes:
+    raw = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+    reparsed = ET.fromstring(raw)
+    declared_prefixes = _declared_prefixes(raw)
+    ignorable_attr = qn("mc", "Ignorable")
+    ignorable_value = reparsed.attrib.get(ignorable_attr)
+    if ignorable_value:
+        valid_tokens = [
+            token for token in ignorable_value.split() if token in declared_prefixes
+        ]
+        if valid_tokens:
+            reparsed.set(ignorable_attr, " ".join(valid_tokens))
+        else:
+            reparsed.attrib.pop(ignorable_attr, None)
+        raw = ET.tostring(reparsed, encoding="utf-8", xml_declaration=True)
+    return raw
+
+
+def _declared_prefixes(raw_xml: bytes) -> set[str]:
+    root_match = re.search(rb"<[A-Za-z_][\w.-]*(?::[A-Za-z_][\w.-]*)?\b[^>]*>", raw_xml)
+    if not root_match:
+        return set()
+    root_start = root_match.group(0)
+    return {
+        match.group(1).decode("ascii")
+        for match in re.finditer(rb"\sxmlns:([A-Za-z_][\w.-]*)=", root_start)
+    }
 
 
 def _zip_parts(parts: dict[str, bytes]) -> bytes:

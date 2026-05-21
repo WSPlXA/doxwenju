@@ -6,7 +6,7 @@ services:
       POSTGRES_USER: doxwenju
       POSTGRES_PASSWORD: doxwenju
     ports:
-      - "5432:5432"
+      - "15432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -23,6 +23,9 @@ services:
   api:
     build: .
     env_file: .env.example
+    environment:
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_RERANK_MAX_ELEMENTS_PER_RUN: ${GEMINI_RERANK_MAX_ELEMENTS_PER_RUN:-50}
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     volumes:
       - .:/app
@@ -37,6 +40,9 @@ services:
   worker:
     build: .
     env_file: .env.example
+    environment:
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_RERANK_MAX_ELEMENTS_PER_RUN: ${GEMINI_RERANK_MAX_ELEMENTS_PER_RUN:-50}
     command: celery -A app.tasks.celery_app:celery_app worker --loglevel=INFO
     volumes:
       - .:/app

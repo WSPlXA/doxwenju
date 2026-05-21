@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     gemini_repair_max_operations_per_run: int = 30
     libreoffice_path: str | None = None
     libreoffice_timeout_seconds: int = 120
+    word_postprocess_timeout_seconds: int = 120
     moonshot_api_key: str | None = None
     microsoft_graph_tenant_id: str | None = None
     microsoft_graph_client_id: str | None = None

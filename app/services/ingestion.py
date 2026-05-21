@@ -5,14 +5,12 @@ from app.core.config import settings
 from app.models.document import (
     DocumentVersion,
     FormatAtom,
-    FormatProfile,
     MappingCandidate,
     MappingResult,
     MediaAsset,
     OOXMLPart,
     PatchOperation,
     PatchPlan,
-    ProfileRule,
     Relationship,
     TargetElement,
 )
@@ -65,6 +63,7 @@ def ingest_template_version(db: Session, version: DocumentVersion) -> None:
         _set_status(db, version, "failed", version.progress, str(exc))
         raise
     except Exception as exc:
+        db.rollback()
         _set_status(db, version, "failed", version.progress, f"Unexpected ingestion failure: {exc}")
         raise
 
@@ -93,8 +92,6 @@ def _clear_existing_parse(db: Session, version_id: str) -> None:
     db.execute(delete(MappingResult).where(MappingResult.target_element_id.in_(target_ids)))
     for model in (
         TargetElement,
-        ProfileRule,
-        FormatProfile,
         FormatAtom,
         MediaAsset,
         Relationship,

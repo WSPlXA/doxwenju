@@ -1,4 +1,5 @@
 import hashlib
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 from sqlalchemy import func, select
@@ -7,6 +8,8 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.db.session import get_db
 from app.models.document import (
+    AgentRun,
+    AgentStep,
     Document,
     DocumentVersion,
     MappingCandidate,
@@ -18,6 +21,9 @@ from app.models.document import (
     TargetElement,
 )
 from app.schemas.template import (
+    AgentRunResponse,
+    AgentRunStartResponse,
+    AgentStepResponse,
     AutoRepairResponse,
     MappingCandidateResponse,
     MappingResponse,
@@ -34,6 +40,7 @@ from app.schemas.template import (
 )
 from app.tasks.template_tasks import (
     auto_repair_cycle,
+    format_agent_run,
     patch_plan_execute,
     render_precheck,
     target_ingestion,
@@ -48,6 +55,16 @@ def _latest_target_version(db: Session) -> DocumentVersion | None:
         .join(Document)
         .where(Document.kind == "target")
         .order_by(DocumentVersion.created_at.desc())
+        .limit(1)
+    )
+
+
+def _current_template_version(db: Session) -> DocumentVersion | None:
+    return db.scalar(
+        select(DocumentVersion)
+        .join(Document)
+        .where(Document.is_current_template.is_(True))
+        .order_by(DocumentVersion.version.desc(), DocumentVersion.created_at.desc())
         .limit(1)
     )
 
@@ -184,6 +201,64 @@ def run_latest_target_auto_repair(db: Session = Depends(get_db)):
     return AutoRepairResponse(source_patch_plan_id=plan.id, task_id=task.id, status="queued")
 
 
+@router.post("/latest/agent-run", response_model=AgentRunStartResponse)
+def start_latest_target_agent_run(
+    max_rounds: int = Query(default=3, ge=1, le=10),
+    db: Session = Depends(get_db),
+):
+    version = _latest_target_version(db)
+    if version is None:
+        raise HTTPException(status_code=404, detail="No target document")
+    template = _current_template_version(db)
+    if template is None:
+        raise HTTPException(status_code=404, detail="No current template")
+
+    run = AgentRun(
+        target_document_version_id=version.id,
+        template_document_version_id=template.id,
+        status="queued",
+        max_rounds=max_rounds,
+        summary={
+            "targetDocumentVersionId": version.id,
+            "templateDocumentVersionId": template.id,
+        },
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+
+    task = format_agent_run.delay(run.id)
+    return AgentRunStartResponse(
+        agent_run_id=run.id,
+        task_id=task.id,
+        status=run.status,
+        max_rounds=run.max_rounds,
+    )
+
+
+@router.get("/latest/agent-run/status", response_model=AgentRunResponse)
+def latest_target_agent_run_status(db: Session = Depends(get_db)):
+    version = _latest_target_version(db)
+    if version is None:
+        raise HTTPException(status_code=404, detail="No target document")
+    run = db.scalar(
+        select(AgentRun)
+        .where(AgentRun.target_document_version_id == version.id)
+        .order_by(AgentRun.created_at.desc())
+        .limit(1)
+    )
+    if run is None:
+        raise HTTPException(status_code=404, detail="No agent run for latest target")
+    steps = list(
+        db.scalars(
+            select(AgentStep)
+            .where(AgentStep.agent_run_id == run.id)
+            .order_by(AgentStep.created_at, AgentStep.id)
+        )
+    )
+    return _agent_run_response(run, steps)
+
+
 @router.get("/latest/patch-plan/execution", response_model=PatchExecutionResponse)
 def latest_target_patch_execution(db: Session = Depends(get_db)):
     version = _latest_target_version(db)
@@ -235,7 +310,7 @@ def download_latest_target_output(db: Session = Depends(get_db)):
     return Response(
         content=output.raw_file,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": f'attachment; filename="{output.filename}"'},
+        headers={"Content-Disposition": _attachment_disposition(output.filename)},
     )
 
 
@@ -280,7 +355,7 @@ def download_latest_target_render_pdf(db: Session = Depends(get_db)):
     return Response(
         content=snapshot.pdf_data,
         media_type="application/pdf",
-        headers={"Content-Disposition": 'attachment; filename="render.pdf"'},
+        headers={"Content-Disposition": _attachment_disposition("render.pdf")},
     )
 
 
@@ -386,6 +461,43 @@ def _render_snapshot_response(snapshot: RenderSnapshot) -> RenderSnapshotRespons
         page_count=snapshot.page_count,
         metrics=snapshot.metrics,
         error_message=snapshot.error_message,
+    )
+
+
+def _attachment_disposition(filename: str) -> str:
+    fallback = "".join(char if ord(char) < 128 and char not in {'"', "\\"} else "_" for char in filename)
+    fallback = fallback or "download"
+    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename)}"
+
+
+def _agent_run_response(run: AgentRun, steps: list[AgentStep]) -> AgentRunResponse:
+    return AgentRunResponse(
+        id=run.id,
+        target_document_version_id=run.target_document_version_id,
+        template_document_version_id=run.template_document_version_id,
+        current_output_document_version_id=run.current_output_document_version_id,
+        status=run.status,
+        round_count=run.round_count,
+        max_rounds=run.max_rounds,
+        summary=run.summary,
+        error_message=run.error_message,
+        created_at=run.created_at,
+        updated_at=run.updated_at,
+        steps=[
+            AgentStepResponse(
+                id=step.id,
+                round_number=step.round_number,
+                step_type=step.step_type,
+                status=step.status,
+                patch_plan_id=step.patch_plan_id,
+                patch_execution_id=step.patch_execution_id,
+                render_snapshot_id=step.render_snapshot_id,
+                summary=step.summary,
+                error_message=step.error_message,
+                created_at=step.created_at,
+            )
+            for step in steps
+        ],
     )
 
 

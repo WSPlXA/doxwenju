@@ -305,3 +305,45 @@ class RenderSnapshot(Base, TimestampMixin):
     page_count: Mapped[int | None] = mapped_column(Integer)
     metrics: Mapped[dict | None] = mapped_column(JsonType)
     error_message: Mapped[str | None] = mapped_column(Text)
+
+
+class AgentRun(Base, TimestampMixin):
+    __tablename__ = "agent_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    target_document_version_id: Mapped[str] = mapped_column(
+        ForeignKey("document_versions.id"), nullable=False, index=True
+    )
+    template_document_version_id: Mapped[str] = mapped_column(
+        ForeignKey("document_versions.id"), nullable=False, index=True
+    )
+    current_output_document_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("document_versions.id"), nullable=True
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued", index=True)
+    round_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_rounds: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    summary: Mapped[dict] = mapped_column(JsonType, nullable=False, default=dict)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    steps: Mapped[list["AgentStep"]] = relationship(cascade="all, delete-orphan")
+
+
+class AgentStep(Base, TimestampMixin):
+    __tablename__ = "agent_steps"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    agent_run_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_runs.id"), nullable=False, index=True
+    )
+    round_number: Mapped[int] = mapped_column(Integer, nullable=False, default=0, index=True)
+    step_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    patch_plan_id: Mapped[str | None] = mapped_column(ForeignKey("patch_plans.id"))
+    patch_execution_id: Mapped[str | None] = mapped_column(ForeignKey("patch_executions.id"))
+    render_snapshot_id: Mapped[str | None] = mapped_column(ForeignKey("render_snapshots.id"))
+    summary: Mapped[dict] = mapped_column(JsonType, nullable=False, default=dict)
+    error_message: Mapped[str | None] = mapped_column(Text)
