@@ -12,7 +12,7 @@ from app.models.document import (
     ProfileRule,
     TargetElement,
 )
-from app.services.rerank import maybe_rerank_candidates, rerank_candidates_parallel
+from app.services.rerank import rerank_candidates_parallel
 
 # Numbered heading depth: matches "1 X", "1.2 X", "1.2.3 X" etc.
 _NUMBERED_PREFIX_RE = re.compile(r"^(\d+(?:\.\d+)*)\s+\S")

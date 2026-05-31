@@ -31,7 +31,7 @@ from app.services.rendering import render_libreoffice_precheck
 from app.services.repair_planner import build_internal_repair_plan
 from app.services.target_mapping import rebuild_mapping_results
 from app.services.word_postprocess import apply_word_layout_postprocess
-from app.tasks.template_tasks import target_ingestion
+from app.tasks.template_tasks import _run_format_agent, target_ingestion
 from tests.fixtures.docx_builder import build_minimal_docx
 
 NS = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
@@ -199,17 +199,28 @@ def test_mapping_uses_rerank_when_available(monkeypatch):
         settings.gemini_rerank_enabled = True
         settings.gemini_rerank_max_elements_per_run = 1
 
-        def fake_rerank(db, document_version_id, target, candidates):
-            return candidates[-1], {
-                "provider": "gemini",
-                "model": "fake",
-                "selectedProfileRuleId": candidates[-1]["rule"].id,
-                "confidence": 88,
-                "rationale": "mocked choice",
-                "riskFlags": [],
-            }
+        def fake_rerank_parallel(db, document_version_id, elements_with_candidates):
+            decisions = []
+            for _, candidates in elements_with_candidates:
+                decisions.append(
+                    (
+                        candidates[-1],
+                        {
+                            "provider": "gemini",
+                            "model": "fake",
+                            "selectedProfileRuleId": candidates[-1]["rule"].id,
+                            "confidence": 88,
+                            "rationale": "mocked choice",
+                            "riskFlags": [],
+                        },
+                    )
+                )
+            return decisions
 
-        monkeypatch.setattr("app.services.target_mapping.maybe_rerank_candidates", fake_rerank)
+        monkeypatch.setattr(
+            "app.services.target_mapping.rerank_candidates_parallel",
+            fake_rerank_parallel,
+        )
         mappings = rebuild_mapping_results(db, target.id, template.id)
 
         assert mappings[0].strategy == "gemini_rerank_v0"
@@ -242,6 +253,73 @@ def test_patch_plan_is_generated_from_mapping_results():
         assert all(operation.status == "planned" for operation in operations)
         assert {operation.risk_level for operation in operations}
         assert any(operation.operation_type == "apply_heading_rule" for operation in operations)
+    finally:
+        db.close()
+
+
+def test_agent_reuses_existing_mapping_results_and_draft_plan(monkeypatch):
+    db = _sqlite_session()
+    try:
+        raw = build_minimal_docx()
+        template = _version(db, "template", raw)
+        target = _version(db, "target", raw)
+        ingest_template_version(db, template)
+        ingest_template_version(db, target)
+        rebuild_mapping_results(db, target.id, template.id)
+        plan = rebuild_patch_plan(db, target.id, template.id)
+
+        run = AgentRun(
+            target_document_version_id=target.id,
+            template_document_version_id=template.id,
+            status="queued",
+            max_rounds=1,
+            summary={},
+        )
+        db.add(run)
+        db.commit()
+        db.refresh(run)
+
+        def fail_rebuild_mapping_results(*args, **kwargs):
+            raise AssertionError("agent should reuse existing mappings for an existing draft plan")
+
+        class Execution:
+            id = "execution-id"
+            status = "done"
+            output_document_version_id = target.id
+            summary = {"applied": 1, "skipped": 0}
+
+        def fake_render(db, document_version_id):
+            snapshot = RenderSnapshot(
+                document_version_id=document_version_id,
+                renderer="libreoffice",
+                status="done",
+                page_count=1,
+                metrics={},
+            )
+            db.add(snapshot)
+            db.commit()
+            db.refresh(snapshot)
+            return snapshot
+
+        monkeypatch.setattr(
+            "app.tasks.template_tasks.rebuild_mapping_results",
+            fail_rebuild_mapping_results,
+        )
+        monkeypatch.setattr("app.tasks.template_tasks.execute_patch_plan", lambda db, _: Execution())
+        monkeypatch.setattr(
+            "app.tasks.template_tasks.apply_word_layout_postprocess",
+            lambda db, _: (target, {"status": "done"}),
+        )
+        monkeypatch.setattr("app.tasks.template_tasks.render_libreoffice_precheck", fake_render)
+
+        result = _run_format_agent(db, run)
+
+        assert result["status"] == "done"
+        assert result["summary"]["stopReason"] == "all_operations_applied"
+        assert result["summary"]["passed"] is True
+        mapping_step = next(step for step in run.steps if step.step_type == "mapping")
+        assert mapping_step.summary["reusedExistingMappings"] is True
+        assert db.query(PatchPlan).filter_by(id=plan.id).one_or_none() is not None
     finally:
         db.close()
 

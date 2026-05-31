@@ -1637,6 +1637,9 @@
       
       const stopReasonMap = {
         all_operations_applied: '规则完全应用 ✓',
+        render_precheck_passed: '渲染预检通过',
+        render_precheck_unavailable: '渲染预检不可用',
+        page_count_unavailable: '页数读取不可用',
         max_rounds_reached: '达最大修复上限',
         layout_drift_too_large: '布局漂移过大',
         no_repairable_operations: '无可校正操作',
@@ -1649,7 +1652,16 @@
       
       if (run.status === 'needs_human') {
         sumBox.className = 'result-summary-box warn';
-        sumTxt.textContent = '完成校正。部分微调对版面排版页数影响略大，推荐下载 PDF 深度人工校验。';
+        const renderGateReason = s.renderGateReason ?? s.stopReason;
+        if (renderGateReason === 'render_precheck_unavailable') {
+          sumTxt.textContent = '已完成格式校正，但当前环境未完成渲染预检。请确认 LibreOffice 可用后复核输出。';
+        } else if (renderGateReason === 'page_count_unavailable') {
+          sumTxt.textContent = '已完成格式校正，但未能读取渲染页数。建议下载 DOCX/PDF 后人工核对版面。';
+        } else if (s.stopReason === 'no_repairable_operations') {
+          sumTxt.textContent = `完成校正。仍有 ${s.skippedOperations ?? '少量'} 项需人工复核，建议下载 PDF 检查最终版面。`;
+        } else {
+          sumTxt.textContent = '完成校正。部分微调对版面排版页数影响略大，推荐下载 PDF 深度人工校验。';
+        }
       } else {
         sumBox.className = 'result-summary-box';
         sumTxt.textContent = '成功完成全套格式自动校正。所有结构规则已被精准灌入。';

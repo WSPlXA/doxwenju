@@ -208,9 +208,14 @@ def _run_format_agent(db: Session, run: AgentRun) -> dict:
         )
 
         _update_agent_run(db, run, "mapping")
-        mapping_count = len(
-            rebuild_mapping_results(db, target_version.id, template_version.id)
-        )
+        current_plan = _latest_draft_patch_plan(db, target_version.id, template_version.id)
+        mapping_count = _mapping_count(db, target_version.id)
+        reused_existing_mappings = current_plan is not None and mapping_count >= target_element_count
+        if not reused_existing_mappings:
+            mapping_count = len(
+                rebuild_mapping_results(db, target_version.id, template_version.id)
+            )
+            current_plan = None
         _record_agent_step(
             db,
             run.id,
@@ -219,13 +224,11 @@ def _run_format_agent(db: Session, run: AgentRun) -> dict:
             "done",
             {
                 "mappingCount": mapping_count,
-                "reusedExistingMappings": False,
+                "reusedExistingMappings": reused_existing_mappings,
                 "templateDocumentVersionId": template_version.id,
             },
         )
-        current_plan = _latest_draft_patch_plan(db, target_version.id) or rebuild_patch_plan(
-            db, target_version.id, template_version.id
-        )
+        current_plan = current_plan or rebuild_patch_plan(db, target_version.id, template_version.id)
         for round_number in range(1, run.max_rounds + 1):
             _update_agent_run(db, run, "patching", round_count=round_number)
             _record_agent_step(
@@ -289,18 +292,16 @@ def _run_format_agent(db: Session, run: AgentRun) -> dict:
             )
 
             skipped_count = _skipped_operation_count(db, current_plan.id)
-            page_drift = _page_count_drift(baseline_snapshot.page_count, snapshot.page_count)
-            if skipped_count == 0 and page_drift <= 1:
+            render_gate = _render_gate_result(baseline_snapshot, snapshot)
+            if skipped_count == 0 and render_gate["passed"]:
                 return _finish_agent_run(
                     db,
                     run,
                     status="done",
                     summary={
-                        "stopReason": "all_operations_applied",
                         "rounds": round_number,
-                        "baselinePageCount": baseline_snapshot.page_count,
-                        "outputPageCount": snapshot.page_count,
-                        "pageCountDrift": page_drift,
+                        **render_gate,
+                        "stopReason": "all_operations_applied",
                         "lastPatchPlanId": current_plan.id,
                         "lastExecutionId": execution.id,
                         "postprocess": postprocess_summary,
@@ -308,17 +309,15 @@ def _run_format_agent(db: Session, run: AgentRun) -> dict:
                         "renderStatus": snapshot.status,
                     },
                 )
-            if skipped_count == 0 and page_drift > 1:
+            if skipped_count == 0 and not render_gate["passed"]:
                 return _finish_agent_run(
                     db,
                     run,
                     status="needs_human",
                     summary={
-                        "stopReason": "layout_drift_too_large",
                         "rounds": round_number,
-                        "baselinePageCount": baseline_snapshot.page_count,
-                        "outputPageCount": snapshot.page_count,
-                        "pageCountDrift": page_drift,
+                        **render_gate,
+                        "stopReason": render_gate["stopReason"],
                         "lastPatchPlanId": current_plan.id,
                         "lastExecutionId": execution.id,
                         "postprocess": postprocess_summary,
@@ -333,9 +332,10 @@ def _run_format_agent(db: Session, run: AgentRun) -> dict:
                     run,
                     status="needs_human",
                     summary={
-                        "stopReason": "max_rounds_reached",
                         "rounds": round_number,
                         "skippedOperations": skipped_count,
+                        **render_gate,
+                        "stopReason": "max_rounds_reached",
                         "lastPatchPlanId": current_plan.id,
                         "lastExecutionId": execution.id,
                         "postprocess": postprocess_summary,
@@ -352,9 +352,10 @@ def _run_format_agent(db: Session, run: AgentRun) -> dict:
                     run,
                     status="needs_human",
                     summary={
-                        "stopReason": "no_repairable_operations",
                         "rounds": round_number,
                         "skippedOperations": skipped_count,
+                        **render_gate,
+                        "stopReason": "no_repairable_operations",
                         "lastPatchPlanId": current_plan.id,
                         "lastExecutionId": execution.id,
                         "postprocess": postprocess_summary,
@@ -380,6 +381,7 @@ def _run_format_agent(db: Session, run: AgentRun) -> dict:
             summary={"stopReason": "loop_exhausted", "rounds": run.round_count},
         )
     except Exception as exc:
+        db.rollback()
         return _finish_agent_run(
             db,
             run,
@@ -482,14 +484,63 @@ def _page_count_drift(left: int | None, right: int | None) -> int:
     return abs(left - right)
 
 
-def _latest_draft_patch_plan(db: Session, document_version_id: str) -> PatchPlan | None:
-    return db.scalar(
+def _render_gate_result(
+    baseline_snapshot,
+    output_snapshot,
+    max_page_count_drift: int = 1,
+) -> dict:
+    baseline_status = getattr(baseline_snapshot, "status", None)
+    output_status = getattr(output_snapshot, "status", None)
+    baseline_page_count = getattr(baseline_snapshot, "page_count", None)
+    output_page_count = getattr(output_snapshot, "page_count", None)
+
+    result = {
+        "passed": False,
+        "baselineRenderStatus": baseline_status,
+        "outputRenderStatus": output_status,
+        "baselinePageCount": baseline_page_count,
+        "outputPageCount": output_page_count,
+        "pageCountDrift": _page_count_drift(baseline_page_count, output_page_count),
+    }
+    if baseline_status != "done" or output_status != "done":
+        return {
+            **result,
+            "stopReason": "render_precheck_unavailable",
+            "renderGateReason": "render_precheck_unavailable",
+        }
+    if baseline_page_count is None or output_page_count is None:
+        return {
+            **result,
+            "stopReason": "page_count_unavailable",
+            "renderGateReason": "page_count_unavailable",
+        }
+    if result["pageCountDrift"] > max_page_count_drift:
+        return {
+            **result,
+            "stopReason": "layout_drift_too_large",
+            "renderGateReason": "layout_drift_too_large",
+        }
+    return {
+        **result,
+        "passed": True,
+        "stopReason": "render_precheck_passed",
+        "renderGateReason": "render_precheck_passed",
+    }
+
+
+def _latest_draft_patch_plan(
+    db: Session,
+    document_version_id: str,
+    template_document_version_id: str | None = None,
+) -> PatchPlan | None:
+    stmt = (
         select(PatchPlan)
         .where(PatchPlan.document_version_id == document_version_id)
         .where(PatchPlan.status == "draft")
-        .order_by(PatchPlan.created_at.desc())
-        .limit(1)
     )
+    if template_document_version_id is not None:
+        stmt = stmt.where(PatchPlan.template_document_version_id == template_document_version_id)
+    return db.scalar(stmt.order_by(PatchPlan.created_at.desc()).limit(1))
 
 
 def _mark_version_failed(db: Session, document_version_id: str, exc: Exception) -> None:

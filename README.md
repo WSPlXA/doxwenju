@@ -1,5 +1,7 @@
 # DOCX Visual Consistency Backend MVP
 
+Current package version: `0.1.1`.
+
 Python backend MVP for deterministic DOCX ingestion and OOXML parsing. The first milestone
 stores DOCX package parts, relationships, media, effective-format records, and format atoms in
 PostgreSQL with pgvector enabled for later retrieval.
@@ -46,6 +48,18 @@ curl -OJ http://localhost:8000/targets/latest/render.pdf
 curl -X POST "http://localhost:8000/targets/latest/agent-run?max_rounds=3"
 curl http://localhost:8000/targets/latest/agent-run/status
 ```
+
+Run a repeatable local smoke test against the Docker API:
+
+```bash
+GEMINI_API_KEY= docker compose up -d --force-recreate api worker
+./scripts/smoke_agent.sh
+```
+
+The script uploads the bundled fixture DOCX files, waits for template and target ingestion,
+runs the agent, verifies output downloads, and writes smoke artifacts to `/tmp/doxwenju-smoke`.
+It treats both `done` and `needs_human` as valid agent terminal states because visual drift or
+unsupported operations can require manual review after the deterministic pipeline completes.
 
 ## Agent Run Modes
 
